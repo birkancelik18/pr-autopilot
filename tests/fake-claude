@@ -5,6 +5,11 @@ printf '%s\n' "$PWD" "$@" >"$S/claude.args"
 find . -not -path './.git' -not -path './.git/*' -type f | sort >"$S/claude.cwdfiles"
 jd=$(printf '%s\n' "$@" | grep -o 'job_dir=[^ ]*' | head -1 | cut -d= -f2)
 echo "$jd" >"$S/claude.jobdir"
+if grep -q 'SHORTEN the review draft' "$S/claude.args" && [ -z "${FAKE_SHORTEN_FAIL:-}" ]; then
+  printf 'VERDICT: APPROVE\n\nShort enough now.\n' >"$jd/draft.md"
+  echo '{"type":"result","subtype":"success","result":"shortened","is_error":false,"permission_denials":[],"num_turns":2,"duration_ms":10,"total_cost_usd":0.05}'
+  exit 0
+fi
 case "${FAKE_CLAUDE:-review}" in
   review) printf 'VERDICT: APPROVE\n\nNo blockers found.\n' >"$jd/draft.md" ;;
   review-rc) printf 'VERDICT: REQUEST_CHANGES\n\nsrc/a.txt:2 drops the null check, so empty input crashes.\n' >"$jd/draft.md" ;;

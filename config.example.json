@@ -11,5 +11,6 @@
   "job_timeout_minutes": 30,
   "slack_webhook": "",
   "trusted_commenters": [],
-  "auto_approve_outsiders": false
+  "auto_approve_outsiders": false,
+  "max_cost_usd_per_job": 10
 }

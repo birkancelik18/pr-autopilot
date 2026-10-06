@@ -130,7 +130,7 @@ git -C "$W/clone" remote set-url origin https://github.com/acme/app.git
 git -C "$W/clone" config url."$O".insteadOf https://github.com/acme/app.git
 git -C "$W/clone" config user.name t; git -C "$W/clone" config user.email t@t
 jq --arg s "$SHA" '.head.sha = $s | .head.ref = "feature-11"' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"
-jq -n --arg c "$W/clone" '{repos: {"acme/app": $c}, dry_run: false}' >"$PR_AUTOPILOT_CONFIG"
+jq -n --arg c "$W/clone" '{repos: {"acme/app": $c}, dry_run: false}' >"$PR_AUTOPILOT_CONFIG"; cp "$PR_AUTOPILOT_CONFIG" "$W/cfg0.json"
 ev() { # ev <kind> <dry_run> [head]
   local key="review|acme/app|11|$SHA" who=alice cr=false
   [ "$1" = fix ] && { key="fix|acme/app|11|r901-v0-c5001-i0"; who=bob; cr=true; }
@@ -139,7 +139,7 @@ ev() { # ev <kind> <dry_run> [head]
       title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d}' >"$W/ev.json"
 }
 job() { bash "$T/../scripts/job.sh" "$W/ev.json"; }
-reset() { rm -rf "$S/fake" "$S/writes.log" "$S/handled.tsv" "$S/failed.tsv" "$S/notified" "$S/claude."*; }
+reset() { rm -rf "$S/logs" "$S/fake" "$S/writes.log" "$S/handled.tsv" "$S/failed.tsv" "$S/notified" "$S/claude."*; }
 allow() { awk '/^--allowedTools$/ {getline; print}' "$S/claude.args"; }
 deny() { awk '/^--disallowedTools$/ {getline; print}' "$S/claude.args"; }
 nwrites() { grep -c "$1" "$S/writes.log" 2>/dev/null || true; }
@@ -177,11 +177,16 @@ check "and says so" 1 "$(grep -c 'I did not post: I already reviewed this commit
 
 echo "-- review: bad drafts and failures are loud, nothing is posted"
 reset; ev review false; FAKE_CLAUDE=review-long job
-check "over 150 words fails" 1 "$(grep -c 'FAILED (attempt 1 of 3): draft body is 200 words' "$S/notified")"
-check "failure is recorded for retry" 1 "$(grep -c "live|review|acme/app|11|$SHA" "$S/failed.tsv")"
-check "nothing written, notification left unread" 0 "$([ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0)"
+check "over 150 words: asks for a shorter draft once, then posts the shortened review" "1 1" "$(cat "$S/logs/"*review.log | grep -c 'asking for a shorter one') $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
+check "usage includes the follow-up (0.5 + 0.05)" 1 "$(cat "$S/logs/"*review.log | grep -c '^usage: total_cost_usd=0.5500$')"
+reset; ev review false; FAKE_SHORTEN_FAIL=1 FAKE_CLAUDE=review-long job
+check "still over after the follow-up fails (attempt 1 of 3) and posts nothing" "1 1 0" "$(grep -c 'FAILED (attempt 1 of 3): draft body is 200 words even after asking' "$S/notified") $(grep -c 'live|review' "$S/failed.tsv") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+reset; jq '. + {max_cost_usd_per_job: 0.1}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"; ev review false; FAKE_CLAUDE=review job
+check "cost over max_cost_usd_per_job is reported but nothing is stopped" "1 1" "$(grep -c 'Cost warning: this job cost about $0.5000, over max_cost_usd_per_job=0.1' "$S/notified") $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
 FAKE_CLAUDE=review-badverdict job; check "bad VERDICT line fails" 1 "$(grep -c "must be 'VERDICT: APPROVE'" "$S/notified")"
 FAKE_CLAUDE=none job; check "missing draft fails" 1 "$(grep -c 'wrote no draft.md' "$S/notified")"
+FAKE_CLAUDE=review-badverdict job
 check "third failure says giving up" 1 "$(grep -c 'attempt 3 of 3, giving up' "$S/notified")"
 reset; FAKE_CLAUDE=crash job; check "claude crash is reported" 1 "$(grep -c 'FAILED (attempt 1 of 3): claude exited with status 1' "$S/notified")"
 reset; ev review false; FAKE_AGENTS=2 FAKE_CLAUDE=review job

@@ -35,7 +35,7 @@ Edit `~/.config/pr-autopilot/config.json` and set `"dry_run": false`. No restart
 
 ## Config
 
-See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (default true), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `trusted_commenters` (extra logins whose feedback may start a fix job, see below), `auto_approve_outsiders` (default false, see below), `max_parallel` (default 2), `job_timeout_minutes` (default 30), `slack_webhook`, and the opt-in `run_local_tests_UNSAFE` (see Safety). Live mode needs `"dry_run": false` exactly; any other value, a missing key or an unreadable config means dry-run.
+See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (default true), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `trusted_commenters` (extra logins whose feedback may start a fix job, see below), `auto_approve_outsiders` (default false, see below), `max_parallel` (default 2), `max_cost_usd_per_job` (default 10; a notification is sent when a job's estimated cost exceeds it, nothing is stopped), `job_timeout_minutes` (default 30), `slack_webhook`, and the opt-in `run_local_tests_UNSAFE` (see Safety). Live mode needs `"dry_run": false` exactly; any other value, a missing key or an unreadable config means dry-run.
 
 ## How decisions are made
 
@@ -89,7 +89,8 @@ Remaining risks: a prompt injection can still skew a review's wording or verdict
 - Search API limit is 30 requests a minute; the poller makes two per poll. A PR whose `updated_at` did not change since it was last settled is not re-fetched.
 - Review dedupe is per (PR, head commit): a re-request on an unchanged head does not trigger a second review.
 - Job logs are kept 14 days, `polls.log` is trimmed at 1 MB.
-- It uses your own Claude usage. Three review passes plus subagents is not free; lower `max_parallel` or pause when needed.
+- A review draft over 150 words is not thrown away: one cheap follow-up turn asks Claude to shorten it without dropping a blocker, and only a draft still over the limit fails.
+- It uses your own Claude usage. Each review (three parallel subagent passes plus the blend) costs roughly what a long interactive Claude Code session does, and the job log records `usage: total_cost_usd=...` per job. Three review passes plus subagents is not free; lower `max_parallel` or pause when needed.
 - Review verdicts are only as good as the model; read the first few in dry-run before trusting it.
 - Not tested on real GitHub writes (review post, push, replies, re-request): those paths ran only against a fake `gh`. launchd, systemd and cron installation was not exercised either, only the generated plist and unit were checked.
 

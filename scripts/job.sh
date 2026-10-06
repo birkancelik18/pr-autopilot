@@ -152,18 +152,33 @@ prompt="/pr-autopilot:$skill job_dir=$JOB me=$me"
 tmo=$(cfgd job_timeout_minutes 30)
 cd "$WT" || fail "cannot enter worktree"
 abort_if_paused
-set -m # job control: claude and everything it spawns get their own process group, so pause or the timeout kill all of it
-claude -p "$prompt" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
-  --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
-  --add-dir "$JOB" --allowedTools "$(join "${allow[@]}")" --disallowedTools "$(join "${deny[@]}")" \
-  --output-format stream-json --verbose --no-session-persistence </dev/null >"$JOB/claude.jsonl" 2>>"$LOG" &
-cpid=$!
-set +m
-(sleep $((tmo * 60)); echo "timeout after ${tmo}m" >>"$LOG"; kill -TERM -- "-$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null) 2>/dev/null &
-wd=$!; disown "$wd"
-wait "$cpid"; rc=$?
-stop_wd; cpid=""
-jq -c 'select(.type == "result")' "$JOB/claude.jsonl" 2>/dev/null | tail -1 >"$JOB/claude.json"
+total_cost=0
+# run_claude <prompt> <out.jsonl>: sets rc. Own process group so pause or the timeout kill all of it.
+run_claude() {
+  set -m
+  claude -p "$1" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
+    --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
+    --add-dir "$JOB" --allowedTools "$(join "${allow[@]}")" --disallowedTools "$(join "${deny[@]}")" \
+    --output-format stream-json --verbose --no-session-persistence </dev/null >"$2" 2>>"$LOG" &
+  cpid=$!
+  set +m
+  (sleep $((tmo * 60)); echo "timeout after ${tmo}m" >>"$LOG"; kill -TERM -- "-$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null) 2>/dev/null &
+  wd=$!; disown "$wd"
+  wait "$cpid"; rc=$?
+  stop_wd; cpid=""
+  jq -c 'select(.type == "result")' "$2" 2>/dev/null | tail -1 >"$2.result"
+  total_cost=$(awk -v t="$total_cost" -v c="$(jq -r '.total_cost_usd // 0' "$2.result" 2>/dev/null)" 'BEGIN {printf "%.4f", t + c}')
+}
+# Cost is reported, never enforced: one line in the log and a notification if over max_cost_usd_per_job.
+cost_check() {
+  echo "usage: total_cost_usd=$total_cost" >>"$LOG"
+  local max; max=$(cfgd max_cost_usd_per_job 10)
+  awk -v t="$total_cost" -v m="$max" 'BEGIN {exit !(t > m)}' &&
+    report "$prefix Cost warning: this job cost about \$$total_cost, over max_cost_usd_per_job=$max (nothing was stopped). Log: $LOG"
+  return 0
+}
+run_claude "$prompt" "$JOB/claude.jsonl"
+cp "$JOB/claude.jsonl.result" "$JOB/claude.json"
 jq -r '.result // empty' "$JOB/claude.json" >>"$LOG" 2>/dev/null
 # Per-job evidence of what actually ran: subagent (Agent tool) calls, how many in one message, turns, time, cost.
 agent_calls=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null) | .message.content[]?
@@ -177,12 +192,14 @@ echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.js
 [ "$(jq -r '.is_error // false' "$JOB/claude.json" 2>/dev/null)" = false ] ||
   fail "claude reported an error: $(jq -r '.result // "?"' "$JOB/claude.json" | head -c 200)"
 
+cost_check
+
 # =============================== review: post the draft ===============================
 finish_review() {
   [ "${agent_calls:-0}" -ge 3 ] ||
     fail "review needs three parallel passes but only ${agent_calls:-0} subagent call(s) ran (max in one message: ${agent_parallel:-0})"
   [ -s "$JOB/draft.md" ] || fail "the model wrote no draft.md"
-  local verdict body_words why
+  local verdict verdict2 body_words why
   verdict=$(head -1 "$JOB/draft.md" | tr -d '\r')
   case $verdict in
     'VERDICT: APPROVE') event=APPROVE; state=APPROVED ;;
@@ -192,7 +209,20 @@ finish_review() {
   tail -n +2 "$JOB/draft.md" | sed '/./,$!d' >"$JOB/body.md"
   body_words=$(wc -w <"$JOB/body.md" | tr -d ' ')
   [ "$body_words" -gt 0 ] || fail "draft.md has no body"
-  [ "$body_words" -le 150 ] || fail "draft body is $body_words words, limit is 150"
+  if [ "$body_words" -gt 150 ]; then
+    # Do not throw a whole review away over length: one cheap follow-up asks for a shorter draft.
+    echo "draft is $body_words words, asking for a shorter one" >>"$LOG"
+    abort_if_paused
+    run_claude "SHORTEN the review draft at $JOB/draft.md to at most 140 words in the body. Keep the first line (VERDICT) exactly as it is, keep every blocker with its file:line and failure, drop nitpicks, filler and repetition first. Edit that file only. Do not review anything again. job_dir=$JOB" "$JOB/claude-shorten.jsonl"
+    cost_check
+    [ "$rc" -eq 0 ] || fail "claude exited with status $rc while shortening the draft"
+    verdict2=$(head -1 "$JOB/draft.md" | tr -d '\r')
+    [ "$verdict2" = "$verdict" ] || fail "shortening changed the VERDICT line"
+    tail -n +2 "$JOB/draft.md" | sed '/./,$!d' >"$JOB/body.md"
+    body_words=$(wc -w <"$JOB/body.md" | tr -d ' ')
+    [ "$body_words" -gt 0 ] || fail "the shortened draft has no body"
+  fi
+  [ "$body_words" -le 150 ] || fail "draft body is $body_words words even after asking for a shorter one, limit is 150"
   why=$(head -1 "$JOB/body.md" | cut -c1-160)
 
   check_head
