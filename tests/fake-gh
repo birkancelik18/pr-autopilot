@@ -1,13 +1,59 @@
 #!/usr/bin/env bash
-# Fake gh for tests: serves JSON from $FIX, records writes in $PR_AUTOPILOT_STATE/writes.log.
-for a in "$@"; do
+# Fake gh for tests. Serves JSON from $FIX, keeps tiny state in $PR_AUTOPILOT_STATE/fake/, and records
+# every write as one line in $PR_AUTOPILOT_STATE/writes.log.
+S=$PR_AUTOPILOT_STATE/fake; mkdir -p "$S"
+W=$PR_AUTOPILOT_STATE/writes.log
+args=("$@"); ep="" expr="" method=GET fields=() reviewers=() event="" commit_id=""
+if [ "${1:-}" = pr ] && [ "${2:-}" = diff ]; then cat "$FIX/diff.patch"; exit 0; fi
+i=0
+while [ $i -lt ${#args[@]} ]; do
+  a=${args[$i]}
   case $a in
-    user) echo me; exit 0 ;;
-    notifications\?*) cat "$FIX/notifications.json"; exit 0 ;;
-    notifications/threads/*) echo "PATCH $a" >>"$PR_AUTOPILOT_STATE/writes.log"; exit 0 ;;
-    repos/*/pulls/*/reviews) cat "$FIX/reviews-$(basename "$(dirname "$a")")".json 2>/dev/null || echo '[]'; exit 0 ;;
-    repos/*/pulls/*/comments) cat "$FIX/comments-$(basename "$(dirname "$a")")".json 2>/dev/null || echo '[]'; exit 0 ;;
-    repos/*/pulls/*) cat "$FIX/pr-$(basename "$a").json"; exit 0 ;;
+    --jq) i=$((i + 1)); expr=${args[$i]} ;;
+    -X) i=$((i + 1)); method=${args[$i]} ;;
+    -f | -F)
+      i=$((i + 1)); f=${args[$i]}; method=POST; fields+=("$f")
+      case $f in
+        reviewers\[\]=*) reviewers+=("${f#*=}") ;;
+        event=*) event=${f#*=} ;;
+        commit_id=*) commit_id=${f#*=} ;;
+      esac ;;
+    --paginate | api) ;;
+    user | notifications* | repos/* | search/*) ep=$a ;;
   esac
+  i=$((i + 1))
 done
-echo "fake gh: unexpected call: $*" >&2; exit 1
+out() { if [ -n "$expr" ]; then jq -r "$expr"; else cat; fi; }
+num() { sed -E 's#^repos/[^/]+/[^/]+/(pulls|issues)/([0-9]+).*#\2#' <<<"$1"; }
+
+case "$method $ep" in
+  "GET user") echo '{"login":"me"}' | out ;;
+  "GET notifications"*) if [ -n "${FAKE_NOTIF_EMPTY:-}" ]; then echo '[]'; else cat "$FIX"/notifications*.json; fi ;;
+  "GET search/issues"*review-requested*) cat "$FIX/search-review.json" ;;
+  "GET search/issues"*author*) cat "$FIX/search-author.json" ;;
+  "PATCH notifications/threads/"*) echo "PATCH $ep" >>"$W" ;;
+  "GET repos/"*/pulls/*/reviews/*)
+    jq --argjson id "${ep##*/}" '.[] | select(.id == $id)' "$S/posted-reviews.json" | out ;;
+  "GET repos/"*/pulls/*/reviews)
+    n=$(num "$ep")
+    jq -s 'add' <(cat "$FIX/reviews-$n.json" 2>/dev/null || echo '[]') <(cat "$S/posted-reviews.json" 2>/dev/null || echo '[]') ;;
+  "POST repos/"*/pulls/*/reviews)
+    state=APPROVED; [ "$event" = REQUEST_CHANGES ] && state=CHANGES_REQUESTED
+    echo "POST $ep event=$event commit_id=$commit_id" >>"$W"
+    jq -n --arg c "$commit_id" --arg s "$state" '{id: 777, user: {login: "me"}, commit_id: $c, state: $s}' >"$S/new"
+    jq -s 'add' <(cat "$S/posted-reviews.json" 2>/dev/null || echo '[]') <(jq -s . "$S/new") >"$S/p.tmp" && mv "$S/p.tmp" "$S/posted-reviews.json"
+    cat "$S/new" ;;
+  "GET repos/"*/pulls/*/comments) cat "$FIX/comments-$(num "$ep").json" 2>/dev/null || echo '[]' ;;
+  "POST repos/"*/pulls/*/comments/*/replies) echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 888}' ;;
+  "GET repos/"*/issues/*/comments) cat "$FIX/issue-$(num "$ep").json" 2>/dev/null || echo '[]' ;;
+  "POST repos/"*/issues/*/comments) echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 889}' ;;
+  "POST repos/"*/pulls/*/requested_reviewers)
+    echo "POST $ep ${reviewers[*]}" >>"$W"
+    printf '%s\n' "${reviewers[@]}" | jq -R '{login: .}' | jq -s . >"$S/requested.json"; echo '{}' ;;
+  "GET repos/"*/pulls/*)
+    n=$(num "$ep")
+    sha=""; [ -n "${FAKE_HEAD_REPO:-}" ] && sha=$(git -C "$FAKE_HEAD_REPO" rev-parse refs/heads/feature-11)
+    jq --arg sha "$sha" --slurpfile rr <(cat "$S/requested.json" 2>/dev/null || echo '[]') \
+      '(if $sha != "" then .head.sha = $sha else . end) | .requested_reviewers = $rr[0]' "$FIX/pr-$n.json" | out ;;
+  *) echo "fake gh: unexpected call: $*" >&2; exit 1 ;;
+esac

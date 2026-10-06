@@ -1,13 +1,15 @@
 # Shared helpers, sourced by poll.sh, job.sh and ctl.sh. Needs bash, gh, jq, git, claude.
 STATE_DIR=${PR_AUTOPILOT_STATE:-$HOME/.local/state/pr-autopilot}
 CONFIG=${PR_AUTOPILOT_CONFIG:-$HOME/.config/pr-autopilot/config.json}
-PLUGIN_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-mkdir -p "$STATE_DIR"/{logs,running,events,worktrees,bodies}
+PLUGIN_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+mkdir -p "$STATE_DIR"/{logs,running,events,worktrees,jobs}
+touch "$STATE_DIR/polls.log"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$STATE_DIR/polls.log"; }
 cfg() { jq -r "$1" "$CONFIG"; } # usage: cfg '.slack_webhook // ""'
 # cfgd <key> <default-json>: like cfg but keeps an explicit false (jq's // would replace it).
 cfgd() { jq -r --argjson d "$2" ".$1 as \$v | if \$v == null then \$d else \$v end" "$CONFIG"; }
+is_paused() { [ -f "$STATE_DIR/paused" ]; }
 
 # report <message>: macOS notification (notify-send on Linux) plus Slack if configured.
 report() {
@@ -36,4 +38,33 @@ report_throttled() {
   else
     log "ERROR (report throttled) $1"
   fi
+}
+
+# gc: drop leftovers of dead jobs (worktrees, refs) and rotate logs. Called by poll.sh.
+# Directory and ref names end in the owning job's pid.
+gc() {
+  local d pid clone ref
+  for d in "$STATE_DIR"/worktrees/*; do
+    [ -d "$d" ] || continue
+    pid=${d##*-}
+    kill -0 "$pid" 2>/dev/null || rm -rf "$d"
+  done
+  if [ -f "$CONFIG" ]; then
+    while IFS= read -r clone; do
+      [ -d "$clone" ] || continue
+      git -C "$clone" worktree prune 2>/dev/null
+      git -C "$clone" for-each-ref --format='%(refname)' refs/pr-autopilot 2>/dev/null |
+        while read -r ref; do
+          pid=${ref##*-}
+          kill -0 "$pid" 2>/dev/null || git -C "$clone" update-ref -d "$ref" 2>/dev/null
+        done
+    done < <(jq -r '.repos[]' "$CONFIG")
+  fi
+  find "$STATE_DIR/logs" "$STATE_DIR/jobs" "$STATE_DIR/events" -mindepth 1 -maxdepth 1 -mtime +14 \
+    -exec rm -rf {} + 2>/dev/null
+  if [ "$(wc -c <"$STATE_DIR/polls.log" 2>/dev/null || echo 0)" -gt 1000000 ]; then
+    tail -n 2000 "$STATE_DIR/polls.log" >"$STATE_DIR/polls.log.tmp" &&
+      mv "$STATE_DIR/polls.log.tmp" "$STATE_DIR/polls.log"
+  fi
+  return 0
 }

@@ -11,7 +11,8 @@
   "base": {
     "repo": {
       "full_name": "acme/app"
-    }
+    },
+    "ref": "main"
   },
   "head": {
     "ref": "feature-14",

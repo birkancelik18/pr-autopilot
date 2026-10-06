@@ -1,46 +1,83 @@
 #!/usr/bin/env bash
 # One poll: classify unread participating PR notifications, dedupe, start jobs. Run every 60s.
-set -euo pipefail
+# State files (STATE_DIR): handled.tsv (keys of jobs that succeeded), failed.tsv (one line per failed
+# attempt: epoch<TAB>key), running/<pid> (key of live jobs), mode + live_since (see below).
+# No `set -e`: one bad PR must not abort the poll, every step checks its own result.
+set -uo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/lib.sh"
 JOB=${PR_AUTOPILOT_JOB:-$DIR/job.sh}
+MAX_ATTEMPTS=3 RETRY_AFTER=300
 
-[ -f "$STATE_DIR/paused" ] && { log "paused"; exit 0; }
+is_paused && { log "paused"; exit 0; }
 [ -f "$CONFIG" ] || { log "no config at $CONFIG, run /pr-autopilot:setup"; exit 0; }
 
+# Lock: mkdir is atomic; the pid file is written via temp+mv so a reader never sees it half written.
 LOCK=$STATE_DIR/poll.lock
 if ! mkdir "$LOCK" 2>/dev/null; then
   pid=$(cat "$LOCK/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then log "previous poll still running"; exit 0; fi
-  rm -rf "$LOCK" && mkdir "$LOCK"
+  if [ -n "$pid" ]; then
+    kill -0 "$pid" 2>/dev/null && { log "previous poll still running"; exit 0; }
+  elif [ -n "$(find "$LOCK" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
+    log "lock just created by another poll, grace period"; exit 0
+  fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { log "lost the lock race"; exit 0; }
 fi
-echo $$ >"$LOCK/pid"
+echo $$ >"$LOCK/pid.tmp" && mv "$LOCK/pid.tmp" "$LOCK/pid"
 tmp=$(mktemp -d)
 trap 'rm -rf "$LOCK" "$tmp"' EXIT
-trap 'report_throttled "poll failed at line $LINENO (see $STATE_DIR/polls.log). Is gh logged in and online?"' ERR
 
-HANDLED=$STATE_DIR/handled.tsv RETRY=$STATE_DIR/retry.tsv
-touch "$HANDLED"
-me=$(gh api user --jq .login)
+HANDLED=$STATE_DIR/handled.tsv FAILED=$STATE_DIR/failed.tsv SEEN=$STATE_DIR/seen.tsv
+touch "$HANDLED" "$FAILED" "$SEEN"
+[ "$(wc -l <"$SEEN")" -gt 5000 ] && : >"$SEEN"
+gc
+
+me=$(gh api user --jq .login 2>>"$STATE_DIR/polls.log")
+[ -n "$me" ] || { report_throttled "poll failed: gh api user returned nothing. Is gh logged in and online?"; exit 1; }
 dry=$(cfgd dry_run true); mode=live; [ "$dry" = true ] && mode=dry
-max=$(cfg '.max_parallel // 2')
+max=$(cfgd max_parallel 2)
+
+# Going live must not replay the backlog: remember when dry_run was switched off and only act on
+# notifications updated after that. /pr-autopilot:replay resets live_since to the epoch.
+if [ "$mode" = live ] && [ "$(cat "$STATE_DIR/mode" 2>/dev/null)" != live ]; then
+  date -u +%FT%TZ >"$STATE_DIR/live_since"
+  log "dry_run switched off, acting only on notifications updated after $(cat "$STATE_DIR/live_since")"
+fi
+echo "$mode" >"$STATE_DIR/mode"
+live_since=$(cat "$STATE_DIR/live_since" 2>/dev/null || echo 1970-01-01T00:00:00Z)
+
 flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson review_enabled "$(cfgd review_enabled true)"
-  --argjson fix_enabled "$(cfgd fix_enabled true)")
+  --argjson fix_enabled "$(cfgd fix_enabled true)"
+  --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")")
 
-# Work items: unread notifications on configured repos, plus PRs whose head moved mid-job.
+# Sources of PRs to look at. Primary: the search API (works even when on-site notifications are off),
+# one query per kind per poll, covering all configured repos (search is limited to 30 calls/min).
+# Optional extra: unread participating notifications (also lets us mark them read after success).
+repoq=$(jq -r '.repos | keys | map("repo:" + .) | join(" ")' "$CONFIG")
+search() { # search <qualifier> -> items as {thread, reason, repo, number, updated_at}
+  local q="is:pr is:open archived:false $1 $repoq"
+  gh api "search/issues?per_page=100&q=$(jq -rn --arg q "$q" '$q | @uri')" 2>>"$STATE_DIR/polls.log" |
+    jq -c --arg reason "$2" '.items[] | {thread: "", reason: $reason,
+      repo: (.repository_url | sub(".*/repos/"; "")), number, updated_at}'
+}
 {
-  gh api 'notifications?participating=true' | jq -c --slurpfile c "$CONFIG" '
+  search "review-requested:$me" review_requested && search "author:$me" author
+} >"$tmp/search" || { report_throttled "poll failed: GitHub search failed (see $STATE_DIR/polls.log)"; exit 1; }
+if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE_DIR/polls.log" |
+  jq -s -c --slurpfile c "$CONFIG" '
     ($c[0].repos | with_entries(.key |= ascii_downcase)) as $r
-    | .[] | select(.subject.type == "PullRequest" and $r[.repository.full_name | ascii_downcase] != null)
-    | {thread: .id, reason, repo: .repository.full_name,
-       number: (.subject.url | split("/") | last | tonumber), attempt: 0, retry: false}'
-  if [ -s "$RETRY" ]; then
-    jq -Rc 'split("\t") | {thread: "", reason: .[2], repo: .[0], number: (.[1] | tonumber),
-      attempt: (.[3] | tonumber), retry: true}' "$RETRY"
-    : >"$RETRY"
-  fi
-} >"$tmp/items"
+    | (add // [])[] | select(.subject.type == "PullRequest" and $r[.repository.full_name | ascii_downcase] != null)
+    | {thread: .id, reason, repo: .repository.full_name, updated_at,
+       number: (.subject.url | split("/") | last | tonumber)}' >"$tmp/notif"; then
+  log "WARN could not list notifications, continuing with search only"; : >"$tmp/notif"
+fi
+# One item per PR: keep a notification thread id if any, review_requested wins, newest updated_at.
+cat "$tmp/search" "$tmp/notif" | jq -s -c 'group_by([(.repo | ascii_downcase), .number])[]
+  | {thread: (map(.thread) | map(select(. != "")) | first // ""),
+     reason: (if any(.reason == "review_requested") then "review_requested" else .[0].reason end),
+     repo: .[0].repo, number: .[0].number, updated_at: (map(.updated_at) | max)}' >"$tmp/items"
 
 running() {
   local n=0 f
@@ -51,36 +88,71 @@ running() {
   echo "$n"
 }
 
-while IFS= read -r item; do
-  repo=$(jq -r .repo <<<"$item") n=$(jq -r .number <<<"$item")
-  reason=$(jq -r .reason <<<"$item")
-  gh api "repos/$repo/pulls/$n" >"$tmp/pr"
-  gh api --paginate "repos/$repo/pulls/$n/reviews" | jq -s 'add // []' >"$tmp/reviews"
-  gh api --paginate "repos/$repo/pulls/$n/comments" | jq -s 'add // []' >"$tmp/comments"
+key_running() {
+  local f
+  for f in "$STATE_DIR"/running/*; do
+    [ -e "$f" ] && kill -0 "$(basename "$f")" 2>/dev/null && [ "$(cat "$f")" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# fetch <endpoint> <outfile> [paginated]: any failure returns 1 so the caller can skip this PR only.
+fetch() {
+  if [ "${3:-}" = paginated ]; then
+    gh api --paginate "$1" 2>>"$STATE_DIR/polls.log" | jq -s 'add // []' >"$2" && [ -s "$2" ]
+  else
+    gh api "$1" >"$2" 2>>"$STATE_DIR/polls.log" && [ -s "$2" ]
+  fi
+}
+
+# Remember "evaluated, nothing to do" per (mode, PR, updated_at) so quiet PRs cost no API calls.
+settle() { printf '%s\t%s\n' "$seen_key" "$updated" >>"$SEEN"; }
+
+process_item() {
+  local item=$1 repo n reason ev key file thread
+  repo=$(jq -r .repo <<<"$item") n=$(jq -r .number <<<"$item") reason=$(jq -r .reason <<<"$item")
+  if [ "$mode" = live ] && [[ "$(jq -r .updated_at <<<"$item")" < "$live_since" || \
+    "$(jq -r .updated_at <<<"$item")" == "$live_since" ]]; then
+    log "skip $repo#$n: predates going live (use /pr-autopilot:replay to include it)"; return 0
+  fi
+  local seen_key="$mode|$repo#$n" updated
+  updated=$(jq -r .updated_at <<<"$item")
+  if grep -qxF "$seen_key	$updated" "$SEEN"; then return 0; fi # nothing new since we last settled it
+  fetch "repos/$repo/pulls/$n" "$tmp/pr" &&
+    fetch "repos/$repo/pulls/$n/reviews" "$tmp/reviews" paginated &&
+    fetch "repos/$repo/pulls/$n/comments" "$tmp/comments" paginated &&
+    fetch "repos/$repo/issues/$n/comments" "$tmp/issue" paginated ||
+    { log "ERROR $repo#$n: could not fetch PR data, will retry next poll"; return 1; }
   ev=$(jq -n -c -f "$DIR/classify.jq" --arg me "$me" --arg reason "$reason" --arg repo "$repo" \
     "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
-    --slurpfile comments "$tmp/comments")
+    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue") ||
+    { log "ERROR $repo#$n: classification failed"; return 1; }
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
-    log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; continue
+    log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; settle; return 0
   fi
   key="$mode|$(jq -r .key <<<"$ev")"
-  if [ "$(jq -r .retry <<<"$item")" != true ] && grep -qxF "$key" "$HANDLED"; then
-    log "already handled $key"; continue
+  if grep -qxF "$key" "$HANDLED"; then log "already handled $key"; settle; return 0; fi
+  if key_running "$key"; then log "already running $key"; return 0; fi
+  local nfail last
+  nfail=$(awk -F'\t' -v k="$key" '$2 == k' "$FAILED" | wc -l | tr -d ' ')
+  last=$(awk -F'\t' -v k="$key" '$2 == k {t = $1} END {print t + 0}' "$FAILED")
+  if [ "$nfail" -ge "$MAX_ATTEMPTS" ]; then log "gave up on $key after $nfail failures"; return 0; fi
+  if [ "$nfail" -gt 0 ] && [ $(($(date +%s) - last)) -lt "$RETRY_AFTER" ]; then
+    log "backing off $key ($nfail failures)"; return 0
   fi
-  if [ "$(running)" -ge "$max" ]; then log "at max_parallel=$max, deferring $repo#$n"; continue; fi
+  if [ "$(running)" -ge "$max" ]; then log "at max_parallel=$max, deferring $repo#$n"; return 0; fi
 
   file="$STATE_DIR/events/$(date +%Y%m%dT%H%M%S)-${repo//\//_}-$n.json"
-  jq -c --argjson item "$item" --argjson dry "$dry" \
-    '. + {dry_run: $dry, thread: $item.thread, attempt: $item.attempt, reason: $item.reason}' \
-    <<<"$ev" >"$file"
-  echo "$key" >>"$HANDLED"
-  nohup "$JOB" "$file" >/dev/null 2>&1 &
-  echo "$mode $key" >"$STATE_DIR/running/$!"
-  log "started job for $key (pid $!)"
-  # Mark read only now that the job has started. Dry-run leaves your notifications untouched.
   thread=$(jq -r .thread <<<"$item")
-  if [ "$mode" = live ] && [ -n "$thread" ]; then
-    gh api -X PATCH "notifications/threads/$thread" >/dev/null || log "could not mark $thread read"
-  fi
+  jq -c --argjson dry "$dry" --arg thread "$thread" --arg reason "$reason" --argjson attempt "$nfail" \
+    '. + {dry_run: $dry, thread: $thread, reason: $reason, attempt: $attempt}' <<<"$ev" >"$file"
+  nohup "$JOB" "$file" >/dev/null 2>&1 </dev/null &
+  echo "$key" >"$STATE_DIR/running/$!"
+  log "started job for $key (pid $!)"
+}
+
+while IFS= read -r item; do
+  is_paused && { log "paused mid-poll, not starting more jobs"; break; }
+  process_item "$item" || true
 done <"$tmp/items"
 log "poll done ($(wc -l <"$tmp/items" | tr -d ' ') items)"

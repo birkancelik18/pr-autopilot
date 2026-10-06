@@ -5,11 +5,15 @@ A Claude Code plugin that handles two chores on GitHub, as you:
 - Someone asks you to review a PR: it reviews it with three independent passes (bugs, security, project conventions), blends the findings and posts one APPROVE or REQUEST_CHANGES review.
 - Someone requests changes (or leaves review comments) on a PR you wrote: it fixes the genuine points on your PR branch, pushes, replies on each thread and re-requests review.
 
-It is not a long-running agent. A tiny shell poller runs every 60 seconds, asks GitHub for your unread notifications, and only starts a headless `claude -p` when there is a new event. Everything runs with your own `gh` login and your own `claude` login, so everything it posts appears as you and the usage counts against your own Claude plan. Each job works in a separate `git worktree`, never in your working copy. You get a macOS notification (and optionally a Slack message) for every outcome, failures included.
+It is not a long-running agent. A tiny shell poller runs every 60 seconds, asks GitHub what needs you, and only starts a headless `claude -p` when there is a new event. Everything runs with your own `gh` login and your own `claude` login, so everything it posts appears as you and the usage counts against your own Claude plan. Each job works in a separate `git worktree`, never in your working copy. You get a macOS notification (and optionally a Slack message) for every outcome, failures included.
+
+**The model never writes to GitHub.** Claude only reads files (the PR checkout and PR data the script pre-fetched) and writes a draft file or edits the checkout. The scripts do every post, push, reply and re-request themselves, after their own checks, and report only what they verified on GitHub afterwards.
 
 ## Requirements
 
 `gh` (logged in: `gh auth login`), `claude` (logged in with your own account), `jq`, `git`, `bash`, and `curl` if you want Slack. macOS is the target; Linux works with a systemd user timer or cron. Each watched repo needs a local clone with an `origin` remote.
+
+What it watches: the GitHub **search API** is the primary source, so it works even if you keep on-site GitHub notifications off. Each poll runs two searches over your configured repos: open PRs where review is requested from you (`review-requested:you`), and your own open PRs. GitHub notifications (unread, participating) are used as an optional extra source and to mark a notification read after a job succeeds. Limits: search covers requests addressed to you personally, not review requests that only went to a team.
 
 ## Install (3 steps)
 
@@ -19,7 +23,7 @@ claude plugin install pr-autopilot@pr-autopilot
 claude                                                   # then run: /pr-autopilot:setup
 ```
 
-`/pr-autopilot:setup` checks your logins, asks which repos to watch and where their clones are, writes `~/.config/pr-autopilot/config.json`, and installs the 60-second launchd job (macOS) or systemd timer / cron entry (Linux). Re-run it after updating the plugin to refresh the installed copy (`~/.local/share/pr-autopilot/plugin`).
+`/pr-autopilot:setup` checks your logins, asks which repos to watch and where their clones are, writes `~/.config/pr-autopilot/config.json`, and installs the 60-second launchd job (macOS) or systemd timer / cron entry (Linux). The scheduler runs a copy of the plugin kept under `~/.local/share/pr-autopilot/`; re-run setup after updating the plugin to refresh it.
 
 ## Try it in dry-run
 
@@ -27,16 +31,24 @@ Setup leaves `"dry_run": true`. In dry-run the jobs do the full review or fix an
 
 ## Turn on posting
 
-Edit `~/.config/pr-autopilot/config.json` and set `"dry_run": false`. No restart needed. Events already handled in dry-run are run again once in live mode (dry-run and live dedupe separately), so pending unread review requests get real reviews.
+Edit `~/.config/pr-autopilot/config.json` and set `"dry_run": false`. No restart needed. Going live does **not** replay the backlog: only PRs updated after the moment you switched are acted on, so ten old review requests do not become ten reviews at once. Run `/pr-autopilot:replay` if you want the backlog processed too.
 
 ## Config
 
-See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (default true), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `max_parallel` (default 2), `job_timeout_minutes` (default 30), `slack_webhook`, `test_commands` (Bash patterns the fix job may run, for example `"npm run test*"`; sensible defaults exist).
+See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (default true), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `max_parallel` (default 2), `job_timeout_minutes` (default 30), `slack_webhook`, `test_commands` (Bash patterns the fix job may run, for example `"npm run test*"`; sensible defaults exist).
+
+## How decisions are made
+
+- **Review** runs when a PR shows up in your review-requested search, is open, not a draft, and you have not already reviewed its current head commit. A re-request after the author pushes fixes therefore triggers a new review; a re-request with no new commits does not. Dedupe key: (repo, PR, head sha).
+- **Fix** runs on your own open PRs when a human other than you has a new CHANGES_REQUESTED review (each reviewer counts by their latest review, so a later approval cancels it), a COMMENTED review with a body, an inline comment or a top-level comment. Bots are ignored. Dedupe key: (repo, PR, newest id of each of those). Fix is skipped for your own PRs from forks.
+- A job is marked handled only after it succeeded. A failed job is retried by the next poll after 5 minutes, at most 3 times, with a loud report each time. A job stopped by pause is not counted as a failure and starts again after `/pr-autopilot:resume`.
+- If the PR changed (head moved, closed, turned draft) while the job ran, nothing is written and the next poll starts over with fresh data.
 
 ## Day to day
 
 - `/pr-autopilot:status` shows last polls, running and recent jobs, failures.
-- `/pr-autopilot:pause` is the kill switch: the poller does nothing and running jobs are stopped. `/pr-autopilot:resume` undoes it.
+- `/pr-autopilot:pause` is the kill switch: the poller does nothing and running jobs are stopped before they write anything. `/pr-autopilot:resume` undoes it.
+- `/pr-autopilot:replay` includes the pre-live backlog (see above).
 
 ## Uninstall
 
@@ -51,18 +63,26 @@ Config and logs stay in `~/.config/pr-autopilot` and `~/.local/state/pr-autopilo
 
 ## Safety
 
-It never merges, never force-pushes, pushes only to the PR's own branch with a plain `git push`, ignores repos not in your config, and skips draft, closed and merged PRs and (by default) fork PRs. Fix jobs never run on your own PRs from forks. Jobs run in `dontAsk` permission mode with a narrow allow list (read tools, `git`, `gh` scoped to that one PR, your test commands, edits inside the job's worktree); anything else is denied. The deny rules for `gh api` write forms are best effort (Claude Code documents Bash deny rules as not a security boundary), the allow list is the real limit. PR text is untrusted and the skills tell Claude to treat it as data, but a determined prompt injection in a PR is a risk to weigh before you enable posting for repos with outside contributors.
+It never merges, never force-pushes, pushes only to the PR's own branch with a plain `git push`, ignores repos not in your config, and skips draft, closed and merged PRs and (by default) fork PRs.
+
+PR content (descriptions, comments, code, even the repo's own `CLAUDE.md`) is untrusted, so the job is built to survive a hostile PR:
+
+- Claude runs with `--permission-mode dontAsk`, `--setting-sources ""` (no user, project or local settings), `--settings '{"disableAllHooks":true}'` (no hooks from anywhere, including yours) and `--strict-mcp-config` with no MCP servers. Your global `~/.claude` skills, hooks and permission rules therefore do not apply inside a job. Verified against the real `claude` 2.1.291 on a repo with a malicious hook, `.mcp.json`, skill and `CLAUDE.md`: none ran. Not verified: whether Claude Code still reads your own user-level `~/.claude/CLAUDE.md` or memory (it is your own text, not the PR's).
+- The checkout is sparse: `CLAUDE.md`, `AGENTS.md`, `.claude/` and `.mcp.json` (at any depth) are not present. The base branch's copies are handed over as plain `.txt` reference files.
+- Allowed tools: review gets only reads (inside the checkout and the job dir) and one writable file, `draft.md`, plus subagents. Fix gets reads, edits inside the checkout, `result.json`, and only the test and lint commands you list. No `gh`, no `git`, no network commands, no Skill tool. Reads outside the checkout and job dir are denied (checked, including through a symlink in the repo and `~/.config/gh`).
+- Writes happen in the scripts: the review is posted through the API pinned to the exact commit that was reviewed; a second review for the same commit is refused; the fix push is a plain push of the PR branch, then replies, then re-requests, each verified by reading GitHub back.
+
+Remaining risks: the fix job runs your repo's test commands on your PR branch (code you or the model changed), with your environment, so keep `test_commands` narrow. `git add -A` commits whatever the tests left untracked and not ignored. A prompt injection can still skew a review's wording or verdict, which is why dry-run first is recommended; it cannot make the job do anything but post that review.
 
 ## Known limits
 
-- The machine must be awake and online. Events that arrive while it sleeps are handled at the next poll as long as the notification is still unread.
-- GitHub notifications for review requests and participating threads must be on for your account. The poller reads only unread `participating` notifications; if you read a notification in the browser first, pr-autopilot never sees it.
-- Review dedupe is per (PR, head commit). A re-request on an unchanged head commit does not trigger a second review. Fix dedupe is per (latest change-request review id, latest comment id).
-- If the PR head moves during a job, nothing is posted and the PR is retried on the next poll (3 tries).
-- It reads each PR's reviews and comments on every poll while its notification is unread, which is a few API calls per PR per minute.
+- The machine must be awake and online. A PR that needs you is picked up at the next poll after wake.
+- Search API limit is 30 requests a minute; the poller makes two per poll. A PR whose `updated_at` did not change since it was last settled is not re-fetched.
+- Review dedupe is per (PR, head commit): a re-request on an unchanged head does not trigger a second review.
+- Job logs are kept 14 days, `polls.log` is trimmed at 1 MB.
 - It uses your own Claude usage. Three review passes plus subagents is not free; lower `max_parallel` or pause when needed.
 - Review verdicts are only as good as the model; read the first few in dry-run before trusting it.
-- Not verified on a real PR yet: the headless `claude -p` run with `--plugin-dir` was exercised only against a fake `claude` in the tests.
+- Not tested on real GitHub writes (review post, push, replies, re-request): those paths ran only against a fake `gh`. launchd, systemd and cron installation was not exercised either, only the generated plist and unit were checked.
 
 ## Tests
 
@@ -70,4 +90,4 @@ It never merges, never force-pushes, pushes only to the PR's own branch with a p
 bash tests/run.sh
 ```
 
-No network: the poller and the job runner run against a fake `gh`, a fake `claude` and recorded JSON fixtures.
+No network: the poller and the job runner run against a fake `gh`, a fake `claude`, a throwaway git repo and recorded JSON fixtures (notifications, search results, PRs, reviews, comments).

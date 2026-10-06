@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# usage: ctl.sh pause|resume|status
+# usage: ctl.sh pause|resume|replay|status
 set -uo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/lib.sh"
@@ -7,7 +7,8 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 case ${1:-} in
   pause)
     touch "$STATE_DIR/paused"
-    # Kill switch: also stop jobs that are mid-run (they have posted nothing yet unless at their last step).
+    # Kill switch: also stop running jobs. Their notifications stay unread, so after /resume the
+    # next poll starts them again.
     for f in "$STATE_DIR"/running/*; do
       [ -e "$f" ] || continue
       pkill -TERM -P "$(basename "$f")" 2>/dev/null
@@ -19,7 +20,14 @@ case ${1:-} in
   resume)
     rm -f "$STATE_DIR/paused"
     log "RESUMED by user"
-    echo "pr-autopilot resumed."
+    echo "pr-autopilot resumed. Jobs stopped by pause start again at the next poll."
+    ;;
+  replay)
+    # Include unread notifications that predate going live (normally skipped).
+    echo 1970-01-01T00:00:00Z >"$STATE_DIR/live_since"
+    : >"$STATE_DIR/seen.tsv"
+    log "REPLAY requested by user"
+    echo "Next poll will also act on older unread notifications (live mode only)."
     ;;
   status)
     [ -f "$STATE_DIR/paused" ] && echo "State: PAUSED" || echo "State: active"
@@ -38,8 +46,9 @@ case ${1:-} in
     ls -t "$STATE_DIR/logs"/*.log 2>/dev/null | head -8 | while read -r l; do
       echo "  $(basename "$l")$(grep -q '^FAILED' "$l" && echo '   <-- FAILED')"
     done
+    echo; echo "Failed attempts (epoch, key):"; tail -5 "$STATE_DIR/failed.tsv" 2>/dev/null
     echo; echo "Recent reports and failures:"
     grep 'REPORT' "$STATE_DIR/polls.log" 2>/dev/null | tail -8
     ;;
-  *) echo "usage: ctl.sh pause|resume|status" >&2; exit 2 ;;
+  *) echo "usage: ctl.sh pause|resume|replay|status" >&2; exit 2 ;;
 esac

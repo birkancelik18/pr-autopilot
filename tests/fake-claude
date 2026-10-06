@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Fake claude for job tests. FAKE_CLAUDE picks the behaviour. Records what the job gave it.
+S=$PR_AUTOPILOT_STATE
+printf '%s\n' "$PWD" "$@" >"$S/claude.args"
+find . -not -path './.git' -not -path './.git/*' -type f | sort >"$S/claude.cwdfiles"
+jd=$(printf '%s\n' "$@" | grep -o 'job_dir=[^ ]*' | head -1 | cut -d= -f2)
+echo "$jd" >"$S/claude.jobdir"
+case "${FAKE_CLAUDE:-review}" in
+  review) printf 'VERDICT: APPROVE\n\nNo blockers found.\n' >"$jd/draft.md" ;;
+  review-rc) printf 'VERDICT: REQUEST_CHANGES\n\nsrc/a.txt:2 drops the null check, so empty input crashes.\n' >"$jd/draft.md" ;;
+  review-long) { printf 'VERDICT: APPROVE\n\n'; for i in $(seq 1 200); do printf 'word '; done; } >"$jd/draft.md" ;;
+  review-badverdict) printf 'LGTM\n\nfine\n' >"$jd/draft.md" ;;
+  fix)
+    echo fixed >>src/a.txt
+    cat >"$jd/result.json" <<'J'
+{"summary": "the missing null check", "commit_message": "Add null check",
+ "replies": [{"in_reply_to": 5001, "body": "Fixed in {{sha}}."}], "re_request": ["bob", "stranger"]}
+J
+    ;;
+  fix-badreply)
+    echo '{"summary":"x","replies":[{"in_reply_to":424242,"body":"hi"}],"re_request":[]}' >"$jd/result.json" ;;
+  none) ;;
+  crash) echo boom >&2; exit 1 ;;
+esac
+echo '{"result":"done","is_error":false,"permission_denials":[]}'

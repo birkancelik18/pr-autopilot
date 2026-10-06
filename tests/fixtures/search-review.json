@@ -1,0 +1,20 @@
+{
+  "total_count": 3,
+  "items": [
+    {
+      "repository_url": "https://api.github.com/repos/acme/app",
+      "number": 11,
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "repository_url": "https://api.github.com/repos/acme/app",
+      "number": 19,
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "repository_url": "https://api.github.com/repos/acme/app",
+      "number": 20,
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ]
+}

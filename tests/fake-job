@@ -1,2 +1,12 @@
 #!/usr/bin/env bash
-jq -c '[.kind, .repo, .number, .head, .dry_run, .key]' "$1" >>"$PR_AUTOPILOT_STATE/jobs.log"
+# Stand-in for job.sh in poller tests: records the event and, like the real job, marks success in
+# handled.tsv or (FAKE_JOB_FAIL=1) a failure in failed.tsv.
+S=$PR_AUTOPILOT_STATE
+jq -c '[.kind, .repo, .number, .head, .dry_run, .key]' "$1" >>"$S/jobs.log"
+mode=live; [ "$(jq -r .dry_run "$1")" = true ] && mode=dry
+if [ "${FAKE_JOB_FAIL:-}" = 1 ]; then
+  printf '%s\t%s|%s\n' "$(date +%s)" "$mode" "$(jq -r .key "$1")" >>"$S/failed.tsv"
+else
+  echo "$mode|$(jq -r .key "$1")" >>"$S/handled.tsv"
+fi
+rm -f "$S/running/$$"

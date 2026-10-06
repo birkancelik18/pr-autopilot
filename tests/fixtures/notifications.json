@@ -10,7 +10,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/11"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t2",
@@ -23,7 +24,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/12"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t3",
@@ -36,7 +38,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/13"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t4",
@@ -49,7 +52,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/14"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t5",
@@ -62,7 +66,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/other/x/pulls/15"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t6",
@@ -75,7 +80,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/16"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t7",
@@ -88,7 +94,8 @@
       "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/17"
-    }
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
   },
   {
     "id": "t8",
@@ -99,6 +106,21 @@
     },
     "subject": {
       "type": "Issue",
+      "title": "t",
+      "url": "https://api.github.com/repos/acme/app/pulls/18"
+    },
+    "updated_at": "2026-01-01T00:00:00Z"
+  },
+  {
+    "id": "t9",
+    "reason": "author",
+    "unread": true,
+    "updated_at": "2026-01-01T00:00:00Z",
+    "repository": {
+      "full_name": "acme/app"
+    },
+    "subject": {
+      "type": "PullRequest",
       "title": "t",
       "url": "https://api.github.com/repos/acme/app/pulls/18"
     }

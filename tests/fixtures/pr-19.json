@@ -1,0 +1,24 @@
+{
+  "number": 19,
+  "state": "open",
+  "draft": false,
+  "merged": false,
+  "title": "PR 19 title",
+  "html_url": "https://github.com/acme/app/pull/19",
+  "user": {
+    "login": "alice"
+  },
+  "base": {
+    "repo": {
+      "full_name": "acme/app"
+    },
+    "ref": "main"
+  },
+  "head": {
+    "ref": "feature-19",
+    "sha": "iii999",
+    "repo": {
+      "full_name": "acme/app"
+    }
+  }
+}
