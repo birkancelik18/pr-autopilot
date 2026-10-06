@@ -139,13 +139,21 @@ abort_if_paused
 claude -p "$prompt" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
   --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
   --add-dir "$JOB" --allowedTools "$(join "${allow[@]}")" --disallowedTools "$(join "${deny[@]}")" \
-  --output-format json --no-session-persistence </dev/null >"$JOB/claude.json" 2>>"$LOG" &
+  --output-format stream-json --verbose --no-session-persistence </dev/null >"$JOB/claude.jsonl" 2>>"$LOG" &
 cpid=$!
 (sleep $((tmo * 60)); echo "timeout after ${tmo}m" >>"$LOG"; kill "$cpid" 2>/dev/null) 2>/dev/null &
 wd=$!; disown "$wd"
 wait "$cpid"; rc=$?
 stop_wd; cpid=""
+jq -c 'select(.type == "result")' "$JOB/claude.jsonl" 2>/dev/null | tail -1 >"$JOB/claude.json"
 jq -r '.result // empty' "$JOB/claude.json" >>"$LOG" 2>/dev/null
+# Per-job evidence of what actually ran: subagent (Agent tool) calls, how many in one message, turns, time, cost.
+agent_calls=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null) | .message.content[]?
+  | select(.type == "tool_use" and (.name == "Agent" or .name == "Task")) | .id] | unique | length' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
+agent_parallel=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null)
+  | {m: .message.id, c: [.message.content[]? | select(.type == "tool_use" and (.name == "Agent" or .name == "Task")) | .id]}]
+  | group_by(.m) | map(map(.c[]) | unique | length) | max // 0' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
+echo "stats: agent_calls=${agent_calls:-0} max_agents_in_one_message=${agent_parallel:-0} $(jq -r '"num_turns=\(.num_turns) duration_ms=\(.duration_ms) cost_usd=\(.total_cost_usd)"' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
 echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
 [ "$rc" -eq 0 ] || fail "claude exited with status $rc (143 or 137 usually means the timeout)"
 [ "$(jq -r '.is_error // false' "$JOB/claude.json" 2>/dev/null)" = false ] ||
@@ -153,6 +161,8 @@ echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.js
 
 # =============================== review: post the draft ===============================
 finish_review() {
+  [ "${agent_calls:-0}" -ge 3 ] ||
+    fail "review needs three parallel passes but only ${agent_calls:-0} subagent call(s) ran (max in one message: ${agent_parallel:-0})"
   [ -s "$JOB/draft.md" ] || fail "the model wrote no draft.md"
   local verdict body_words why
   verdict=$(head -1 "$JOB/draft.md" | tr -d '\r')

@@ -156,6 +156,8 @@ check "checkout has no CLAUDE.md, AGENTS.md, .claude/ or .mcp.json (also nested)
 check "checkout still has the code" 1 "$(grep -c '^./src/a.txt$' "$S/claude.cwdfiles")"
 check "base AGENTS.md is given as a plain data file" "base conventions" "$(cat "$(cat "$S/claude.jobdir")/conventions/AGENTS.md.txt")"
 check "base .claude/rules is given as a data file" "rule one" "$(cat "$(cat "$S/claude.jobdir")/conventions/.claude__rules__r1.md.txt")"
+check "job log records subagent calls, parallelism, turns, duration, cost" 1 "$(grep -c '^stats: agent_calls=3 max_agents_in_one_message=3 num_turns=5 duration_ms=1234 cost_usd=0.5$' "$S/logs/"*review.log)"
+check "claude is asked for stream-json" 1 "$(grep -cxF stream-json "$S/claude.args")"
 check "diff and reviews are pre-fetched" 1 "$([ -s "$(cat "$S/claude.jobdir")/diff.patch" ] && [ -s "$(cat "$S/claude.jobdir")/reviews.json" ] && echo 1 || echo 0)"
 check "dry-run writes nothing to GitHub" 0 "$([ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0)"
 check "dry-run reports what it would have done" 1 "$(grep -c '\[DRY RUN\] PR #11 (PR 11 title): alice asked you to review it. I would have posted APPROVE: No blockers found. (nothing was posted)' "$S/notified")"
@@ -180,6 +182,8 @@ FAKE_CLAUDE=review-badverdict job; check "bad VERDICT line fails" 1 "$(grep -c "
 FAKE_CLAUDE=none job; check "missing draft fails" 1 "$(grep -c 'wrote no draft.md' "$S/notified")"
 check "third failure says giving up" 1 "$(grep -c 'attempt 3 of 3, giving up' "$S/notified")"
 reset; FAKE_CLAUDE=crash job; check "claude crash is reported" 1 "$(grep -c 'FAILED (attempt 1 of 3): claude exited with status 1' "$S/notified")"
+reset; ev review false; FAKE_AGENTS=2 FAKE_CLAUDE=review job
+check "fewer than three review passes fails loudly, nothing posted, retry recorded" "1 1 0" "$(grep -c 'FAILED (attempt 1 of 3): review needs three parallel passes but only 2 subagent call(s) ran' "$S/notified") $(grep -c 'live|review' "$S/failed.tsv") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
 reset; ev review false deadbeef; FAKE_CLAUDE=review job
 check "head moved before start: quiet skip, no failure, no post" "0 0" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/failed.tsv" ] && echo 1 || echo 0)"
 reset; touch "$S/paused"; ev review false; FAKE_CLAUDE=review job; rm "$S/paused"
