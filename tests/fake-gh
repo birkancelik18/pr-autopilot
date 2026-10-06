@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake gh for tests: serves JSON from $FIX, records writes in $PR_AUTOPILOT_STATE/writes.log.
+for a in "$@"; do
+  case $a in
+    user) echo me; exit 0 ;;
+    notifications\?*) cat "$FIX/notifications.json"; exit 0 ;;
+    notifications/threads/*) echo "PATCH $a" >>"$PR_AUTOPILOT_STATE/writes.log"; exit 0 ;;
+    repos/*/pulls/*/reviews) cat "$FIX/reviews-$(basename "$(dirname "$a")")".json 2>/dev/null || echo '[]'; exit 0 ;;
+    repos/*/pulls/*/comments) cat "$FIX/comments-$(basename "$(dirname "$a")")".json 2>/dev/null || echo '[]'; exit 0 ;;
+    repos/*/pulls/*) cat "$FIX/pr-$(basename "$a").json"; exit 0 ;;
+  esac
+done
+echo "fake gh: unexpected call: $*" >&2; exit 1

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+jq -c '[.kind, .repo, .number, .head, .dry_run, .key]' "$1" >>"$PR_AUTOPILOT_STATE/jobs.log"

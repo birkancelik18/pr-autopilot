@@ -1,0 +1,23 @@
+{
+  "number": 13,
+  "state": "open",
+  "draft": true,
+  "merged": false,
+  "title": "PR 13 title",
+  "html_url": "https://github.com/acme/app/pull/13",
+  "user": {
+    "login": "alice"
+  },
+  "base": {
+    "repo": {
+      "full_name": "acme/app"
+    }
+  },
+  "head": {
+    "ref": "feature-13",
+    "sha": "ccc333",
+    "repo": {
+      "full_name": "acme/app"
+    }
+  }
+}

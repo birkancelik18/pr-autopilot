@@ -1,0 +1,23 @@
+{
+  "number": 12,
+  "state": "open",
+  "draft": false,
+  "merged": false,
+  "title": "PR 12 title",
+  "html_url": "https://github.com/acme/app/pull/12",
+  "user": {
+    "login": "me"
+  },
+  "base": {
+    "repo": {
+      "full_name": "acme/app"
+    }
+  },
+  "head": {
+    "ref": "feature-12",
+    "sha": "bbb222",
+    "repo": {
+      "full_name": "acme/app"
+    }
+  }
+}

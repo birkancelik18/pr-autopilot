@@ -1,0 +1,12 @@
+{
+  "name": "pr-autopilot",
+  "description": "pr-autopilot: review and fix GitHub PRs automatically, as you",
+  "owner": { "name": "Birkan Celik" },
+  "plugins": [
+    {
+      "name": "pr-autopilot",
+      "source": "./",
+      "description": "Poller + skills that review PRs you are asked to review and fix review comments on PRs you authored"
+    }
+  ]
+}

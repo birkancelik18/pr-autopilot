@@ -1,0 +1,23 @@
+{
+  "number": 14,
+  "state": "closed",
+  "draft": false,
+  "merged": false,
+  "title": "PR 14 title",
+  "html_url": "https://github.com/acme/app/pull/14",
+  "user": {
+    "login": "alice"
+  },
+  "base": {
+    "repo": {
+      "full_name": "acme/app"
+    }
+  },
+  "head": {
+    "ref": "feature-14",
+    "sha": "ddd444",
+    "repo": {
+      "full_name": "acme/app"
+    }
+  }
+}
