@@ -20,5 +20,11 @@
     "repo": {
       "full_name": "acme/app"
     }
-  }
+  },
+  "author_association": "MEMBER",
+  "requested_reviewers": [
+    {
+      "login": "me"
+    }
+  ]
 }

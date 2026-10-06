@@ -1,1 +1,45 @@
-[{"id":1,"state":"CHANGES_REQUESTED","user":{"login":"carol"}},{"id":2,"state":"APPROVED","user":{"login":"carol"}},{"id":3,"state":"COMMENTED","body":"","user":{"login":"dave"}},{"id":4,"state":"COMMENTED","body":"ping","user":{"login":"ci[bot]"}},{"id":5,"state":"COMMENTED","body":"","user":{"login":"me"}}]
+[
+  {
+    "id": 1,
+    "state": "CHANGES_REQUESTED",
+    "user": {
+      "login": "carol"
+    },
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 2,
+    "state": "APPROVED",
+    "user": {
+      "login": "carol"
+    },
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 3,
+    "state": "COMMENTED",
+    "body": "",
+    "user": {
+      "login": "dave"
+    },
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 4,
+    "state": "COMMENTED",
+    "body": "ping",
+    "user": {
+      "login": "ci[bot]"
+    },
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 5,
+    "state": "COMMENTED",
+    "body": "",
+    "user": {
+      "login": "me"
+    },
+    "author_association": "MEMBER"
+  }
+]

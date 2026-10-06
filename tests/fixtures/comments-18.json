@@ -1,1 +1,18 @@
-[{"id":6000,"user":{"login":"dependabot[bot]"},"body":"x"},{"id":6001,"user":{"login":"botty"},"body":"y"}]
+[
+  {
+    "id": 6000,
+    "user": {
+      "login": "dependabot[bot]"
+    },
+    "body": "x",
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 6001,
+    "user": {
+      "login": "botty"
+    },
+    "body": "y",
+    "author_association": "MEMBER"
+  }
+]

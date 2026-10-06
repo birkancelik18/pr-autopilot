@@ -15,7 +15,9 @@ STATE=${PR_AUTOPILOT_STATE:-$HOME/.local/state/pr-autopilot}
 
 # Jobs are children of the poller. Without AbandonProcessGroup (launchd) / KillMode=process
 # (systemd) the scheduler kills them the moment poll.sh exits.
+xml_escape() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 render_plist() {
+  local xpath; xpath=$(printf '%s' "$PATH" | xml_escape)
   cat <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -24,7 +26,7 @@ render_plist() {
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>$DEST/scripts/poll.sh</string></array>
   <key>StartInterval</key><integer>60</integer>
   <key>AbandonProcessGroup</key><true/>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PATH</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$xpath</string></dict>
   <key>StandardErrorPath</key><string>$STATE/launchd.err</string>
   <key>StandardOutPath</key><string>$STATE/launchd.out</string>
 </dict></plist>
@@ -51,6 +53,7 @@ live_jobs() { # any job still running?
 install() {
   for c in gh jq git claude; do command -v "$c" >/dev/null || { echo "missing: $c" >&2; exit 1; }; done
   mkdir -p "$BASE" "$STATE"
+  rm -f "$STATE/paused" # a leftover pause from an earlier uninstall must not silence a fresh setup
   if [ "$SRC" != "$(cd "$DEST" 2>/dev/null && pwd -P)" ]; then
     local new=$BASE/plugin-$(date +%s)
     mkdir -p "$new" && cp -R "$SRC/." "$new/"
@@ -63,7 +66,10 @@ install() {
     mkdir -p "$(dirname "$PLIST")"
     render_plist >"$PLIST"
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    # bootout is asynchronous; bootstrap can fail until the old job is gone, so retry.
+    local i
+    for i in 1 2 3 4 5 6; do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break; sleep 1; done
+    launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || { echo "launchd did not load $LABEL" >&2; exit 1; }
     echo "Installed launchd job $LABEL (every 60s)."
   elif command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
     mkdir -p "$UNIT_DIR"
@@ -99,6 +105,18 @@ uninstall() {
   if command -v crontab >/dev/null && crontab -l 2>/dev/null | grep -q '# pr-autopilot'; then
     crontab -l | grep -v '# pr-autopilot' | crontab - || true
   fi
+  rm -f "$STATE/paused"
+  # Leftover worktrees and refs of jobs that were stopped.
+  if [ -f "${PR_AUTOPILOT_CONFIG:-$HOME/.config/pr-autopilot/config.json}" ]; then
+    local clone ref
+    while IFS= read -r clone; do
+      [ -d "$clone" ] || continue
+      git -C "$clone" for-each-ref --format='%(refname)' refs/pr-autopilot 2>/dev/null |
+        while read -r ref; do git -C "$clone" update-ref -d "$ref" 2>/dev/null; done
+      git -C "$clone" worktree prune 2>/dev/null
+    done < <(jq -r '.repos[]' "${PR_AUTOPILOT_CONFIG:-$HOME/.config/pr-autopilot/config.json}")
+  fi
+  rm -rf "$STATE/worktrees"
   if live_jobs; then
     echo "Jobs are still running; the installed copy in $BASE is kept (delete it later)."
   else

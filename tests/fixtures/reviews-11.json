@@ -1,1 +1,11 @@
-[{"id":901,"state":"CHANGES_REQUESTED","user":{"login":"bob"},"commit_id":"x"}]
+[
+  {
+    "id": 901,
+    "state": "CHANGES_REQUESTED",
+    "user": {
+      "login": "bob"
+    },
+    "commit_id": "x",
+    "author_association": "MEMBER"
+  }
+]

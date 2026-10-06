@@ -50,7 +50,7 @@ done
 check "repo not in config is ignored" 0 "$(plog 'other/x')"
 poll; check "second poll starts nothing" 4 "$(jobs_n)"
 jq '.head.sha = "aaa222"' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"
-jq '. + [{"id":5003,"user":{"login":"bob"},"body":"also this"}]' "$FIX/comments-12.json" >"$W/x" && mv "$W/x" "$FIX/comments-12.json"
+jq '. + [{"id":5003,"user":{"login":"bob"},"author_association":"MEMBER","body":"also this"}]' "$FIX/comments-12.json" >"$W/x" && mv "$W/x" "$FIX/comments-12.json"
 bump 11; bump 12
 poll; check "new head and new comment start exactly two more" 6 "$(jobs_n)"
 poll; check "and then no more" 6 "$(jobs_n)"
@@ -126,15 +126,17 @@ git -C "$O" add -A && git -C "$O" -c user.name=t -c user.email=t@t commit -q -m 
 SHA=$(git -C "$O" rev-parse HEAD)
 git -C "$O" branch feature-11 && git -C "$O" update-ref refs/pull/11/head HEAD
 git clone -q "$O" "$W/clone"
+git -C "$W/clone" remote set-url origin https://github.com/acme/app.git
+git -C "$W/clone" config url."$O".insteadOf https://github.com/acme/app.git
 git -C "$W/clone" config user.name t; git -C "$W/clone" config user.email t@t
 jq --arg s "$SHA" '.head.sha = $s | .head.ref = "feature-11"' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"
 jq -n --arg c "$W/clone" '{repos: {"acme/app": $c}, dry_run: false}' >"$PR_AUTOPILOT_CONFIG"
 ev() { # ev <kind> <dry_run> [head]
   local key="review|acme/app|11|$SHA" who=alice cr=false
   [ "$1" = fix ] && { key="fix|acme/app|11|r901-v0-c5001-i0"; who=bob; cr=true; }
-  jq -n --arg k "$1" --argjson d "$2" --arg h "${3:-$SHA}" --arg key "$key" --arg who "$who" --argjson cr "$cr" \
+  jq -n --arg k "$1" --argjson d "$2" --arg a "${ASSOC:-MEMBER}" --arg h "${3:-$SHA}" --arg key "$key" --arg who "$who" --argjson cr "$cr" \
     '{kind:$k, key:$key, repo:"acme/app", number:11, head:$h, branch:"feature-11", base:"main",
-      title:"PR 11 title", url:"https://x/11", dry_run:$d, attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x"}' >"$W/ev.json"
+      title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d}' >"$W/ev.json"
 }
 job() { bash "$T/../scripts/job.sh" "$W/ev.json"; }
 reset() { rm -rf "$S/fake" "$S/writes.log" "$S/handled.tsv" "$S/failed.tsv" "$S/notified" "$S/claude."*; }
@@ -201,11 +203,11 @@ echo "-- fix, live: the script commits, pushes the PR branch only, replies, re-r
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
 new=$(git -C "$O" rev-parse refs/heads/feature-11)
 check "PR branch advanced by one commit on top of the old head" "$SHA" "$(git -C "$O" rev-parse "$new^")"
-check "commit message from result.json" "Add null check" "$(git -C "$O" log -1 --format=%s "$new")"
+check "commit message from result.json, @mentions defanged" 'Add null check `@everyone`' "$(git -C "$O" log -1 --format=%s "$new")"
 check "no other ref was touched (no force, no new branches)" "refs/heads/feature-11 refs/heads/main refs/pull/11/head" \
   "$(git -C "$O" for-each-ref --format='%(refname)' | sort | tr '\n' ' ' | sed 's/ $//')"
 check "agent config files were not deleted by the commit" 0 "$(git -C "$O" diff --name-status "$SHA" "$new" | grep -c '^D')"
-check "reply posted on the thread with the real short sha" "POST repos/acme/app/pulls/11/comments/5001/replies body=Fixed in ${new:0:7}." "$(grep 'replies' "$S/writes.log")"
+check "reply posted on the thread with the real short sha" "POST repos/acme/app/pulls/11/comments/5001/replies body=Fixed in ${new:0:7}, thanks "'`@bob`.' "$(grep 'replies' "$S/writes.log")"
 check "re-request only for actual reviewers (stranger dropped)" "POST repos/acme/app/pulls/11/requested_reviewers bob" "$(grep requested_reviewers "$S/writes.log")"
 check "report states verified facts" 1 "$(grep -c "I fixed the missing null check, pushed ${new:0:7}, replied on 1 thread(s), re-requested review from @bob (verified on GitHub)" "$S/notified")"
 echo "-- fix: malformed result writes nothing"
@@ -213,6 +215,104 @@ git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
 FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-badreply job
 check "reply to a nonexistent comment id is rejected before any write" "1 0" "$(grep -c 'malformed' "$S/notified") $([ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0)"
 check "and the branch is untouched" "$SHA" "$(git -C "$O" rev-parse refs/heads/feature-11)"
+
+
+echo "== safety: fix job has no shell, commits only listed files"
+reset_fix() { git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; rm -f "$S/logs/"*; }
+reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
+check "fix allow list has no Bash at all (default)" 0 "$(allow | grep -c Bash)"
+new=$(git -C "$O" rev-parse refs/heads/feature-11)
+check "only the file listed in result.json is committed, never git add -A" "src/a.txt" "$(git -C "$O" diff --name-only "$SHA" "$new")"
+reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-many job
+check "more replies than open human comments is refused before any write" "1 0" "$(grep -c 'only 1 open human comments' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+cp "$PR_AUTOPILOT_CONFIG" "$W/cfg.bak"
+optin() { jq --argjson c "$1" '. + {run_local_tests_UNSAFE: {"acme/app": $c}}' "$W/cfg.bak" >"$PR_AUTOPILOT_CONFIG"; }
+reset_fix; optin '["ls"]'; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
+check "opt-in tests never run in dry-run" 0 "$(cat "$S/logs/"*fix.log | grep -c 'running sandboxed')"
+if command -v sandbox-exec >/dev/null; then
+  cp "$W/cfg.bak" "$PR_AUTOPILOT_CONFIG"; reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
+  check "no opt-in, no local tests" 0 "$(cat "$S/logs/"*fix.log | grep -c 'running sandboxed')"
+  reset_fix; optin '["ls"]'; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
+  check "opted-in exact command runs sandboxed and the job still succeeds" "1 1" "$(cat "$S/logs/"*fix.log | grep -c 'running sandboxed: ls') $(grep -c 'verified on GitHub' "$S/notified")"
+  rm -f "$HOME/ap-test-outside"; reset_fix; optin "[\"touch $HOME/ap-test-outside\"]"; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
+  check "sandbox blocks writes outside the checkout; failing tests stop the job before any commit" "1 $SHA no" \
+    "$(grep -c 'local test command .* failed' "$S/notified") $(git -C "$O" rev-parse refs/heads/feature-11) $([ -e "$HOME/ap-test-outside" ] && echo yes || echo no)"
+  rm -f "$HOME/ap-test-outside"
+fi
+for bad in 'npx vitest' 'ls *' 'go test -exec foo ./...'; do
+  reset_fix; optin "[\"$bad\"]"; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
+  check "unsafe test command refused: $bad" "1 $SHA" "$(grep -c 'refusing unsafe local test command\|sandbox-exec is not available' "$S/notified") $(git -C "$O" rev-parse refs/heads/feature-11)"
+done
+cp "$W/cfg.bak" "$PR_AUTOPILOT_CONFIG"; git -C "$O" update-ref refs/heads/feature-11 "$SHA"
+
+echo "== safety: only trusted feedback starts a fix, stale notifications do not start a review"
+cls() { # cls <pr> <reviews> <comments> <issue> <reason> <via_search>
+  jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason "$5" --arg repo acme/app --argjson ignore '[]' \
+    --argjson trusted "${TRUSTED:-[]}" --argjson via_search "$6" --argjson allow_forks false --argjson review_enabled true \
+    --argjson fix_enabled true --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4"
+}
+echo '[]' >"$W/empty.json"
+for assoc in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR; do
+  echo "[{\"id\":9,\"user\":{\"login\":\"rando\"},\"author_association\":\"$assoc\",\"body\":\"please add x\"}]" >"$W/c.json"
+  check "feedback from a $assoc author is ignored (and counted)" "nothing to address 1" "$(cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '"\(.skip) \(.untrusted)"')"
+done
+for assoc in OWNER MEMBER COLLABORATOR; do
+  echo "[{\"id\":9,\"user\":{\"login\":\"pal\"},\"author_association\":\"$assoc\",\"body\":\"please add x\"}]" >"$W/c.json"
+  check "feedback from a $assoc starts a fix" fix "$(cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r .kind)"
+done
+echo '[{"id":9,"user":{"login":"rando"},"author_association":"NONE","body":"x"}]' >"$W/c.json"
+check "trusted_commenters can vouch for an outsider" fix "$(TRUSTED='["rando"]' cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r .kind)"
+jq '.requested_reviewers = []' "$FIX/pr-11.json" >"$W/pr-stale.json"
+check "S2: stale review_requested notification (I am not requested any more): skipped" "not a current requested reviewer (stale notification)" \
+  "$(cls "$W/pr-stale.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested false | jq -r .skip)"
+check "S2: same PR found by the review-requested search: reviewed" review "$(cls "$W/pr-stale.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r .kind)"
+check "S2: notification while I am still a requested reviewer: reviewed" review "$(cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested false | jq -r .kind)"
+
+echo "== safety: APPROVE is only auto-posted for org members"
+reset; ASSOC=NONE ev review false; FAKE_CLAUDE=review job
+check "outsider PR + APPROVE: draft only, nothing posted, user told" "1 0" "$(grep -c 'wrote an APPROVE draft but did not post it: the PR author is NONE' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c 'POST .*reviews')"
+check "and it is marked handled so it is not redone" 1 "$(grep -cxF "live|review|acme/app|11|$SHA" "$S/handled.tsv")"
+reset; ASSOC=NONE ev review false; FAKE_CLAUDE=review-rc job
+check "outsider PR + REQUEST_CHANGES still posts" 1 "$(cat "$S/writes.log" | grep -c 'event=REQUEST_CHANGES')"
+reset; jq '. + {auto_approve_outsiders: true}' "$W/cfg.bak" >"$PR_AUTOPILOT_CONFIG"; ASSOC=NONE ev review false; FAKE_CLAUDE=review job
+check "auto_approve_outsiders: true posts the APPROVE" 1 "$(cat "$S/writes.log" | grep -c 'event=APPROVE')"
+cp "$W/cfg.bak" "$PR_AUTOPILOT_CONFIG"
+
+echo "== safety: fail closed on dry_run"
+reset; ev review false; jq 'del(.dry_run)' "$W/ev.json" >"$W/ev2.json"; mv "$W/ev2.json" "$W/ev.json"; FAKE_CLAUDE=review job
+check "event without dry_run is a dry run" "1 0" "$(grep -c 'DRY RUN' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+reset; ev review false; jq '.dry_run = "false"' "$W/ev.json" >"$W/ev2.json"; mv "$W/ev2.json" "$W/ev.json"; FAKE_CLAUDE=review job
+check "dry_run as the string \"false\" is still a dry run" 1 "$(grep -c 'DRY RUN' "$S/notified")"
+reset; ev review false; jq '.dry_run = true' "$PR_AUTOPILOT_CONFIG" >"$W/c2" && mv "$W/c2" "$PR_AUTOPILOT_CONFIG"; FAKE_CLAUDE=review job
+check "config switched back to dry mid-flight: nothing written" 0 "$(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+cp "$W/cfg.bak" "$PR_AUTOPILOT_CONFIG"
+printf '{"repos": {"acme/app": "/x"}, "dry_run": "false"}' >"$W/c3.json"
+check "poller: dry_run that is not exactly false means dry" dry "$(PR_AUTOPILOT_CONFIG=$W/c3.json PR_AUTOPILOT_STATE=$W/st3 bash -c 'mkdir -p $PR_AUTOPILOT_STATE; . '"$T"'/../scripts/lib.sh; jq -r "if .dry_run == false then \"live\" else \"dry\" end" "$CONFIG"')"
+printf '{ broken' >"$W/c4.json"
+PR_AUTOPILOT_CONFIG=$W/c4.json PR_AUTOPILOT_STATE=$W/st4 PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1
+check "poller: corrupt config does nothing and exits non-zero" "1 no" "$? $([ -e "$W/st4/running" ] && ls "$W/st4/running" | grep -q . && echo yes || echo no)"
+
+echo "== safety: process groups, mentions, slack, search chunks, origin, quiet skips"
+reset; ev review false; rm -f "$S/hang.pid"
+FAKE_CLAUDE=hang bash "$T/../scripts/job.sh" "$W/ev.json" & jp=$!
+for i in $(seq 1 50); do [ -s "$S/hang.pid" ] && break; sleep 0.1; done
+hp=$(cat "$S/hang.pid"); kill -TERM "$jp"; wait "$jp" 2>/dev/null; sleep 0.3
+check "pause/TERM kills claude's whole process group, including its children" "gone" "$(kill -0 "$hp" 2>/dev/null && echo alive || echo gone)"
+check "slack text is escaped" "&lt;!channel&gt; a&amp;b" "$(printf '<!channel> a&b' | (. "$T/../scripts/lib.sh"; slack_escape))"
+check "mentions are defanged" 'hi `@bob` and `@org/team`' "$(printf 'hi @bob and @org/team' | (. "$T/../scripts/lib.sh"; defang) | tr -d '\n')"
+jq -n '{repos: ([range(0;30) | {key: "some-organisation/a-rather-long-repository-name-\(.)", value: "/x"}] | from_entries)}' >"$W/c5.json"
+chunks=$(PR_AUTOPILOT_CONFIG=$W/c5.json bash -c '. '"$T"'/../scripts/lib.sh; repo_chunks 200')
+check "search query is split into chunks under the length limit" "ok" "$(awk 'length($0) > 200 {bad=1} END {print bad ? "too long" : "ok"}' <<<"$chunks")"
+check "and no repo is lost in the split" 30 "$(tr ' ' '\n' <<<"$chunks" | grep -c '^repo:')"
+check "more than one chunk was needed" 1 "$([ "$(wc -l <<<"$chunks" | tr -d ' ')" -gt 1 ] && echo 1 || echo 0)"
+git -C "$W/clone" remote set-url origin https://github.com/other/thing.git
+reset; ev review false; FAKE_CLAUDE=review job
+check "origin that does not match the configured repo: refused before fetch or push" 1 "$(grep -c "does not point at acme/app" "$S/notified")"
+git -C "$W/clone" remote set-url origin https://github.com/acme/app.git
+reset; ev review false deadbeef; for i in 1 2 3; do FAKE_CLAUDE=review job; done
+check "a PR that keeps changing is reported on the 3rd quiet skip" 1 "$(grep -c 'Skipped 3 times because the PR keeps changing' "$S/notified")"
+check "uninstall and install both clear a leftover pause" 2 "$(grep -c 'rm -f "$STATE/paused"' "$T/../scripts/install-scheduler.sh")"
+check "plist PATH is XML-escaped" 1 "$(PATH='/a&b:/usr/bin:/bin' bash "$T/../scripts/install-scheduler.sh" print-plist | grep -c '/a&amp;b')"
 
 echo; echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

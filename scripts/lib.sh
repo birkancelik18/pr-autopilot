@@ -24,7 +24,7 @@ report() {
   hook=$(cfg '.slack_webhook // ""' 2>/dev/null || true)
   if [ -n "$hook" ]; then
     curl -sS -m 20 -X POST -H 'Content-type: application/json' \
-      -d "$(jq -nc --arg text "$msg" '{text:$text}')" "$hook" >/dev/null 2>>"$STATE_DIR/polls.log" ||
+      -d "$(jq -nc --arg text "$(printf '%s' "$msg" | slack_escape)" '{text:$text}')" "$hook" >/dev/null 2>>"$STATE_DIR/polls.log" ||
       log "slack post failed"
   fi
 }
@@ -39,6 +39,20 @@ report_throttled() {
     log "ERROR (report throttled) $1"
   fi
 }
+
+# repo_chunks <max-len>: one line per group of "repo:a repo:b" qualifiers short enough for GitHub's
+# 256-char search query limit.
+repo_chunks() {
+  jq -r --argjson max "$1" '.repos | keys | map("repo:" + .)
+    | reduce .[] as $r ([""]; if (.[-1] | length) + ($r | length) + 1 > $max then . + [$r]
+      else (.[-1] |= (if . == "" then $r else . + " " + $r end)) end) | .[]' "$CONFIG"
+}
+
+# slack_escape: Slack treats <, > and & specially (<!channel> pings everyone).
+slack_escape() { jq -Rrs 'gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")'; }
+
+# defang: model-written text must not ping people; wrap @mentions in backticks.
+defang() { jq -Rrs 'gsub("@(?<n>[A-Za-z0-9_][A-Za-z0-9_/-]*)"; "`@\(.n)`")'; }
 
 # gc: drop leftovers of dead jobs (worktrees, refs) and rotate logs. Called by poll.sh.
 # Directory and ref names end in the owning job's pid.

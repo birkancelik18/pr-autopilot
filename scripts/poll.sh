@@ -11,6 +11,8 @@ MAX_ATTEMPTS=3 RETRY_AFTER=300
 
 is_paused && { log "paused"; exit 0; }
 [ -f "$CONFIG" ] || { log "no config at $CONFIG, run /pr-autopilot:setup"; exit 0; }
+jq -e '.repos | type == "object" and length > 0' "$CONFIG" >/dev/null 2>&1 ||
+  { report_throttled "pr-autopilot: $CONFIG is unreadable or has no repos, doing nothing"; exit 1; }
 
 # Lock: mkdir is atomic; the pid file is written via temp+mv so a reader never sees it half written.
 LOCK=$STATE_DIR/poll.lock
@@ -35,11 +37,12 @@ gc
 
 me=$(gh api user --jq .login 2>>"$STATE_DIR/polls.log")
 [ -n "$me" ] || { report_throttled "poll failed: gh api user returned nothing. Is gh logged in and online?"; exit 1; }
-dry=$(cfgd dry_run true); mode=live; [ "$dry" = true ] && mode=dry
+# Fail closed: live only when dry_run is exactly false; anything else (missing, null, "false") is dry.
+dry=$(jq -r 'if .dry_run == false then "false" else "true" end' "$CONFIG"); mode=live; [ "$dry" = true ] && mode=dry
 max=$(cfgd max_parallel 2)
 
 # Going live must not replay the backlog: remember when dry_run was switched off and only act on
-# notifications updated after that. /pr-autopilot:replay resets live_since to the epoch.
+# PRs (search results or notifications) updated after that. /pr-autopilot:replay resets live_since to the epoch.
 if [ "$mode" = live ] && [ "$(cat "$STATE_DIR/mode" 2>/dev/null)" != live ]; then
   date -u +%FT%TZ >"$STATE_DIR/live_since"
   log "dry_run switched off, acting only on notifications updated after $(cat "$STATE_DIR/live_since")"
@@ -50,17 +53,23 @@ live_since=$(cat "$STATE_DIR/live_since" 2>/dev/null || echo 1970-01-01T00:00:00
 flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson review_enabled "$(cfgd review_enabled true)"
   --argjson fix_enabled "$(cfgd fix_enabled true)"
-  --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")")
+  --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
+  --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")")
 
 # Sources of PRs to look at. Primary: the search API (works even when on-site notifications are off),
 # one query per kind per poll, covering all configured repos (search is limited to 30 calls/min).
 # Optional extra: unread participating notifications (also lets us mark them read after success).
-repoq=$(jq -r '.repos | keys | map("repo:" + .) | join(" ")' "$CONFIG")
-search() { # search <qualifier> -> items as {thread, reason, repo, number, updated_at}
-  local q="is:pr is:open archived:false $1 $repoq"
-  gh api "search/issues?per_page=100&q=$(jq -rn --arg q "$q" '$q | @uri')" 2>>"$STATE_DIR/polls.log" |
-    jq -c --arg reason "$2" '.items[] | {thread: "", reason: $reason,
-      repo: (.repository_url | sub(".*/repos/"; "")), number, updated_at}'
+search() { # search <qualifier> <reason>: all pages, over each repo chunk (query limit is 256 chars)
+  local chunk q page out n
+  while IFS= read -r chunk; do
+    q="is:pr is:open archived:false $1 $chunk"
+    for page in 1 2 3 4 5; do
+      out=$(gh api "search/issues?per_page=100&page=$page&q=$(jq -rn --arg q "$q" '$q | @uri')" 2>>"$STATE_DIR/polls.log") || return 1
+      jq -c --arg reason "$2" '.items[] | {thread: "", reason: $reason, src: "search",
+        repo: (.repository_url | sub(".*/repos/"; "")), number, updated_at}' <<<"$out" || return 1
+      [ "$(jq '.items | length' <<<"$out")" -ge 100 ] || break
+    done
+  done < <(repo_chunks $((250 - ${#1} - 30)))
 }
 {
   search "review-requested:$me" review_requested && search "author:$me" author
@@ -69,7 +78,7 @@ if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE
   jq -s -c --slurpfile c "$CONFIG" '
     ($c[0].repos | with_entries(.key |= ascii_downcase)) as $r
     | (add // [])[] | select(.subject.type == "PullRequest" and $r[.repository.full_name | ascii_downcase] != null)
-    | {thread: .id, reason, repo: .repository.full_name, updated_at,
+    | {thread: .id, reason, src: "notif", repo: .repository.full_name, updated_at,
        number: (.subject.url | split("/") | last | tonumber)}' >"$tmp/notif"; then
   log "WARN could not list notifications, continuing with search only"; : >"$tmp/notif"
 fi
@@ -77,6 +86,7 @@ fi
 cat "$tmp/search" "$tmp/notif" | jq -s -c 'group_by([(.repo | ascii_downcase), .number])[]
   | {thread: (map(.thread) | map(select(. != "")) | first // ""),
      reason: (if any(.reason == "review_requested") then "review_requested" else .[0].reason end),
+     via_search: any(.src == "search" and .reason == "review_requested"),
      repo: .[0].repo, number: .[0].number, updated_at: (map(.updated_at) | max)}' >"$tmp/items"
 
 running() {
@@ -124,9 +134,11 @@ process_item() {
     fetch "repos/$repo/issues/$n/comments" "$tmp/issue" paginated ||
     { log "ERROR $repo#$n: could not fetch PR data, will retry next poll"; return 1; }
   ev=$(jq -n -c -f "$DIR/classify.jq" --arg me "$me" --arg reason "$reason" --arg repo "$repo" \
-    "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
+    --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
     --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
+  [ "$(jq -r .untrusted <<<"$ev")" = 0 ] ||
+    log "$repo#$n: ignoring $(jq -r .untrusted <<<"$ev") comment(s)/review(s) from untrusted authors (not owner/member/collaborator, not in trusted_commenters)"
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; settle; return 0
   fi

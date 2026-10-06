@@ -10,5 +10,6 @@
   "max_parallel": 2,
   "job_timeout_minutes": 30,
   "slack_webhook": "",
-  "test_commands": ["npm run lint*", "npm run test*", "npm run typecheck*", "pytest*"]
+  "trusted_commenters": [],
+  "auto_approve_outsiders": false
 }

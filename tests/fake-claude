@@ -11,18 +11,22 @@ case "${FAKE_CLAUDE:-review}" in
   review-long) { printf 'VERDICT: APPROVE\n\n'; for i in $(seq 1 200); do printf 'word '; done; } >"$jd/draft.md" ;;
   review-badverdict) printf 'LGTM\n\nfine\n' >"$jd/draft.md" ;;
   fix)
-    echo fixed >>src/a.txt
+    echo fixed >>src/a.txt; echo junk >junk.txt
     cat >"$jd/result.json" <<'J'
-{"summary": "the missing null check", "commit_message": "Add null check",
- "replies": [{"in_reply_to": 5001, "body": "Fixed in {{sha}}."}], "re_request": ["bob", "stranger"]}
+{"summary": "the missing null check", "commit_message": "Add null check @everyone", "files": ["src/a.txt"],
+ "replies": [{"in_reply_to": 5001, "body": "Fixed in {{sha}}, thanks @bob."}], "re_request": ["bob", "stranger"]}
 J
     ;;
   fix-badreply)
     echo '{"summary":"x","replies":[{"in_reply_to":424242,"body":"hi"}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-many)
+    echo fixed >>src/a.txt
+    echo '{"summary":"x","files":["src/a.txt"],"replies":[{"in_reply_to":5001,"body":"a"},{"in_reply_to":5001,"body":"b"}],"re_request":[]}' >"$jd/result.json" ;;
+  hang) sleep 300 & echo $! >"$S/hang.pid"; wait ;;
   none) ;;
   crash) echo boom >&2; exit 1 ;;
 esac
-if [ "${FAKE_CLAUDE:-review}" != fix ] && [ "${FAKE_CLAUDE:-review}" != crash ]; then
+if [ "${FAKE_CLAUDE:-review}" != fix ] && [ "${FAKE_CLAUDE:-review}" != fix-many ] && [ "${FAKE_CLAUDE:-review}" != crash ]; then
   agents=$(for i in $(seq 1 "${FAKE_AGENTS:-3}"); do printf '{"type":"tool_use","id":"toolu_%s","name":"Agent","input":{}},' "$i"; done)
   echo "{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{\"id\":\"msg_1\",\"content\":[${agents%,}]}}"
 fi

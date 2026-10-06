@@ -20,5 +20,11 @@
     "repo": {
       "full_name": "alice/app-fork"
     }
-  }
+  },
+  "author_association": "MEMBER",
+  "requested_reviewers": [
+    {
+      "login": "me"
+    }
+  ]
 }

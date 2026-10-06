@@ -1,1 +1,19 @@
-[{"id":5001,"user":{"login":"bob"},"body":"null check"},{"id":5002,"user":{"login":"me"},"in_reply_to_id":5001,"body":"ok"}]
+[
+  {
+    "id": 5001,
+    "user": {
+      "login": "bob"
+    },
+    "body": "null check",
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 5002,
+    "user": {
+      "login": "me"
+    },
+    "in_reply_to_id": 5001,
+    "body": "ok",
+    "author_association": "MEMBER"
+  }
+]

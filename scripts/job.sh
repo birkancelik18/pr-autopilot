@@ -11,8 +11,10 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 EV=$1
 g() { jq -r "$1" "$EV"; }
 repo=$(g .repo) n=$(g .number) kind=$(g .kind) head=$(g .head) branch=$(g .branch) base=$(g .base)
-title=$(g .title) url=$(g .url) dry=$(g .dry_run) who=$(g .who) cr=$(g '.cr // false')
+title=$(g .title) url=$(g .url) who=$(g .who) cr=$(g '.cr // false')
 thread=$(g '.thread // ""') key=$(g .key)
+# Fail closed: live only when the event says dry_run is exactly false (missing or odd means dry).
+dry=$(jq -r 'if .dry_run == false then "false" else "true" end' "$EV")
 mode=live; [ "$dry" = true ] && mode=dry
 DKEY="$mode|$key"
 
@@ -34,7 +36,7 @@ prefix="PR #$n ($title): $what."
 cpid="" wd="" posted=0
 stop_wd() { [ -n "$wd" ] && { pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wd=""; }; }
 cleanup() {
-  [ -n "$cpid" ] && kill "$cpid" 2>/dev/null
+  [ -n "$cpid" ] && { kill -TERM -- "-$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null; }
   stop_wd
   [ -d "$WT" ] && git -C "$clone" worktree remove --force "$WT" 2>/dev/null
   git -C "$clone" update-ref -d "$REF" 2>/dev/null
@@ -68,7 +70,19 @@ succeed() { # succeed <outcome verified on GitHub>
   report "$prefix $1 $url"
   exit 0
 }
-skip_quietly() { echo "$1" >>"$LOG"; log "$repo#$n: $1"; exit 0; } # poll re-evaluates with fresh data
+# The PR changed under us: nothing was written and the poller starts over with fresh data. If that
+# keeps happening, say so instead of looping silently.
+skip_quietly() {
+  echo "$1" >>"$LOG"; log "$repo#$n: $1"
+  echo "$DKEY" >>"$STATE_DIR/quiet.tsv"
+  [ "$(grep -cxF "$DKEY" "$STATE_DIR/quiet.tsv")" -lt 3 ] ||
+    report "$prefix Skipped $(grep -cxF "$DKEY" "$STATE_DIR/quiet.tsv") times because the PR keeps changing ($1). $url"
+  exit 0
+}
+live_now() { # config must still say dry_run is exactly false at the moment of any write
+  [ "$dry" = true ] || [ "$(jq -r 'if .dry_run == false then "false" else "true" end' "$CONFIG" 2>/dev/null)" = false ] ||
+    skip_quietly "config is no longer live, nothing written"
+}
 
 check_head() { # PR still open, ready, and at the head we worked on
   local cur
@@ -81,6 +95,11 @@ gh_get() { gh api "$@" 2>>"$LOG"; }
 # --- preflight
 me=$(gh api user --jq .login 2>>"$LOG"); [ -n "$me" ] || fail "gh api user failed (not logged in or offline)"
 [ -d "$clone/.git" ] || [ -f "$clone/.git" ] || fail "clone path '$clone' is not a git checkout (fix config.json)"
+ourl=$(git -C "$clone" config --get remote.origin.url | tr 'A-Z' 'a-z'); rl=$(tr 'A-Z' 'a-z' <<<"$repo")
+case $ourl in
+  *[:/]"$rl" | *[:/]"$rl".git) ;;
+  *) fail "the clone's origin ($ourl) does not point at $repo, refusing to fetch or push" ;;
+esac
 abort_if_paused
 
 # --- pre-fetch everything the model may read into the job dir (all of it is untrusted data)
@@ -123,11 +142,8 @@ if [ "$kind" = review ]; then
   allow=(Agent "Edit(/$JOB/draft.md)")
   skill=review-pr
 else
+  # No Bash at all: the model only edits files. The script commits, pushes and (opt-in, sandboxed) tests.
   allow=("Edit(/$WT/**)" "Edit(/$JOB/result.json)")
-  while IFS= read -r t; do allow+=("Bash($t)"); done < <(jq -r '(.test_commands // ["npm run lint*",
-    "npm run test*", "npm test*", "npm run typecheck*", "npx vitest*", "npx eslint*", "pytest*",
-    "uv run pytest*", "uv run ruff*", "ruff *", "mypy*", "make test*", "make lint*", "go test*",
-    "cargo test*"])[]' "$CONFIG")
   skill=address-review
 fi
 join() { local IFS=,; echo "$*"; }
@@ -136,12 +152,14 @@ prompt="/pr-autopilot:$skill job_dir=$JOB me=$me"
 tmo=$(cfgd job_timeout_minutes 30)
 cd "$WT" || fail "cannot enter worktree"
 abort_if_paused
+set -m # job control: claude and everything it spawns get their own process group, so pause or the timeout kill all of it
 claude -p "$prompt" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
   --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
   --add-dir "$JOB" --allowedTools "$(join "${allow[@]}")" --disallowedTools "$(join "${deny[@]}")" \
   --output-format stream-json --verbose --no-session-persistence </dev/null >"$JOB/claude.jsonl" 2>>"$LOG" &
 cpid=$!
-(sleep $((tmo * 60)); echo "timeout after ${tmo}m" >>"$LOG"; kill "$cpid" 2>/dev/null) 2>/dev/null &
+set +m
+(sleep $((tmo * 60)); echo "timeout after ${tmo}m" >>"$LOG"; kill -TERM -- "-$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null) 2>/dev/null &
 wd=$!; disown "$wd"
 wait "$cpid"; rc=$?
 stop_wd; cpid=""
@@ -178,19 +196,28 @@ finish_review() {
   why=$(head -1 "$JOB/body.md" | cut -c1-160)
 
   check_head
-  local already
+  local already assoc
   already=$(gh_get --paginate "repos/$repo/pulls/$n/reviews" | jq -s --arg me "$me" --arg h "$head" \
     '[add[] | select(.user.login == $me and .commit_id == $h and (.state == "APPROVED" or .state == "CHANGES_REQUESTED"))] | length') ||
     fail "cannot list existing reviews"
   [ "$already" = 0 ] || succeed "I did not post: I already reviewed this commit."
+  # An APPROVE is the one thing a hostile diff would try to steer, so it is only posted automatically
+  # for PRs by people in your org. For anyone else you get the draft and decide.
+  assoc=$(g '.author_assoc // "NONE"')
+  if [ "$event" = APPROVE ] && [ "$assoc" != OWNER ] && [ "$assoc" != MEMBER ] &&
+    [ "$(cfgd auto_approve_outsiders false)" != true ]; then
+    succeed "I wrote an APPROVE draft but did not post it: the PR author is $assoc, not a member of your org. Draft: $JOB/draft.md. $why"
+  fi
   if [ "$dry" = true ]; then
     succeed "I would have posted $event: $why (nothing was posted)."
   fi
+  live_now
   abort_if_paused
+  defang <"$JOB/body.md" >"$JOB/body.safe.md"
   posted=1
   local resp rid got
   resp=$(gh api -X POST "repos/$repo/pulls/$n/reviews" -f commit_id="$head" -f event="$event" \
-    -F body=@"$JOB/body.md" 2>>"$LOG") || fail "posting the review failed"
+    -F body=@"$JOB/body.safe.md" 2>>"$LOG") || fail "posting the review failed"
   rid=$(jq -r '.id // empty' <<<"$resp")
   [ -n "$rid" ] || fail "review post returned no id"
   got=$(gh_get "repos/$repo/pulls/$n/reviews/$rid" --jq '[.user.login, .commit_id, .state] | join(" ")') ||
@@ -199,20 +226,62 @@ finish_review() {
   succeed "I posted $event (verified on GitHub, review $rid, commit ${head:0:7}): $why"
 }
 
+# Opt-in only (config run_local_tests_UNSAFE: {"owner/repo": ["exact command", ...]}), never in dry-run.
+# The script runs the exact configured commands itself, sandboxed (no network, writes only inside the
+# checkout and tmp, secrets dirs unreadable) with a scrubbed environment. macOS only (sandbox-exec).
+run_local_tests() {
+  [ "$dry" = true ] && return 0
+  local cmds cmd wtr jobr prof rc
+  cmds=$(jq -r --arg r "$repo" '(.run_local_tests_UNSAFE // {}) | to_entries[]
+    | select(.key | ascii_downcase == ($r | ascii_downcase)) | .value[]' "$CONFIG")
+  [ -n "$cmds" ] || return 0
+  command -v sandbox-exec >/dev/null ||
+    fail "run_local_tests_UNSAFE is set but sandbox-exec is not available here; refusing to run tests unsandboxed"
+  wtr=$(cd "$WT" && pwd -P); jobr=$(cd "$JOB" && pwd -P); mkdir -p "$JOB/home"
+  prof="(version 1)(allow default)(deny network*)(deny file-write* (require-not (require-any (subpath \"$wtr\") (subpath \"$jobr\") (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (subpath \"/dev\"))))(deny file-read* (subpath \"$HOME/.ssh\") (subpath \"$HOME/.aws\") (subpath \"$HOME/.config/gh\") (subpath \"$HOME/.config/pr-autopilot\"))"
+  while IFS= read -r cmd; do
+    case $cmd in
+      *'*'* | npx* | *' -exec'* | *sandbox*) fail "refusing unsafe local test command '$cmd' (no globs, npx or -exec)" ;;
+    esac
+    echo "running sandboxed: $cmd" >>"$LOG"
+    set -m
+    (cd "$WT" && exec env -i PATH="$PATH" HOME="$jobr/home" TMPDIR=/private/tmp LANG=C.UTF-8 \
+      sandbox-exec -p "$prof" bash -c "$cmd") >>"$LOG" 2>&1 &
+    cpid=$!; set +m
+    wait "$cpid"; rc=$?; cpid=""
+    [ "$rc" -eq 0 ] || fail "local test command '$cmd' failed (exit $rc), nothing committed"
+  done <<<"$cmds"
+}
+
 # =============================== fix: commit, push, reply, re-request ===============================
 finish_fix() {
   local r=$JOB/result.json
   [ -s "$r" ] || fail "the model wrote no result.json"
   jq -e --slurpfile cm "$JOB/comments.json" '
     (.summary | type == "string") and (.commit_message // "x" | type == "string")
+    and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
+      and (contains("..") | not) and (startswith(".git") | not)))
     and (.re_request | type == "array" and all(type == "string"))
     and (.replies | type == "array" and all(
       (.body | type == "string" and length > 0 and length < 3000)
       and (.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))))' "$r" >/dev/null ||
     fail "result.json is malformed or replies to a comment id that does not exist"
 
-  local dirty changed summary msg newsha
-  dirty=$(git -C "$WT" status --porcelain | wc -l | tr -d ' ')
+  # Reply cap: at most one per open human comment, never more than 20.
+  local cap
+  cap=$(jq -n --arg me "$me" --slurpfile c "$JOB/comments.json" --slurpfile i "$JOB/issue-comments.json" \
+    --slurpfile v "$JOB/reviews.json" '[$c[0][], $i[0][], ($v[0][] | select((.body // "") != ""))]
+    | map(select(.user.login != $me and (.user.login | endswith("[bot]") | not))) | length | if . > 20 then 20 else . end')
+  [ "$(jq '.replies | length' "$r")" -le "$cap" ] || fail "result.json has $(jq '.replies | length' "$r") replies but there are only $cap open human comments (cap)"
+
+  # Only the files the model lists are committed, never `git add -A`.
+  local dirty changed summary msg newsha files=() f
+  while IFS= read -r f; do files+=("$f"); done < <(jq -r '(.files // [])[]' "$r")
+  dirty=0
+  [ ${#files[@]} -eq 0 ] || dirty=$(git -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
+  git -C "$WT" status --porcelain | cut -c4- | while IFS= read -r f; do
+    case " ${files[*]-} " in *" $f "*) ;; *) echo "not committed (not listed in result.json): $f" >>"$LOG" ;; esac
+  done
   summary=$(jq -r '.summary' "$r" | cut -c1-200)
   nreplies=$(jq '.replies | length' "$r")
   check_head
@@ -220,12 +289,14 @@ finish_fix() {
     local lg; lg=$(jq -r '.re_request | map("@" + .) | join(", ")' "$r")
     succeed "I would have $([ "$dirty" -gt 0 ] && echo "fixed: $summary ($dirty files), pushed, ")replied on $nreplies thread(s)$([ -n "$lg" ] && echo ", re-requested review from $lg") (nothing was pushed or posted)."
   fi
+  live_now
   abort_if_paused
+  [ "$dirty" -eq 0 ] || run_local_tests
   newsha=$head
   if [ "$dirty" -gt 0 ]; then
-    msg=$(jq -r '.commit_message // "Address review feedback"' "$r" | head -c 300)
+    msg=$(jq -r '.commit_message // "Address review feedback"' "$r" | head -c 300 | defang)
     [ -n "$msg" ] || msg="Address review feedback"
-    git -C "$WT" add -A >>"$LOG" 2>&1 || fail "git add failed"
+    git -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
     git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
     newsha=$(git -C "$WT" rev-parse HEAD)
     posted=1
@@ -241,7 +312,7 @@ finish_fix() {
   local short=${newsha:0:7} errs="" nposted=0 idx id body resp
   for idx in $(seq 0 $((nreplies - 1))); do
     id=$(jq -r ".replies[$idx].in_reply_to // empty" "$r")
-    body=$(jq -r --arg s "$short" ".replies[$idx].body | gsub(\"\\\\{\\\\{sha\\\\}\\\\}\"; \$s)" "$r")
+    body=$(jq -r --arg s "$short" ".replies[$idx].body | gsub(\"\\\\{\\\\{sha\\\\}\\\\}\"; \$s)" "$r" | defang)
     posted=1
     if [ -n "$id" ]; then resp=$(gh api "repos/$repo/pulls/$n/comments/$id/replies" -f body="$body" 2>>"$LOG")
     else resp=$(gh api "repos/$repo/issues/$n/comments" -f body="$body" 2>>"$LOG"); fi
