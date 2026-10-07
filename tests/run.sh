@@ -12,6 +12,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
+cp "$W/bin/osascript" "$W/bin/terminal-notifier"
 chmod +x "$W/bin/"* "$T/fake-job"
 export PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
 S=$PR_AUTOPILOT_STATE
@@ -157,7 +158,7 @@ check "gh, git and curl are denied" 3 "$(deny | tr ',' '\n' | grep -cE '^Bash\((
 check "checkout has no CLAUDE.md, AGENTS.md, .claude/ or .mcp.json (also nested)" 0 "$(grep -cE 'CLAUDE|AGENTS|\.mcp|\.claude' "$S/claude.cwdfiles")"
 check "checkout still has the code" 1 "$(grep -c '^./src/a.txt$' "$S/claude.cwdfiles")"
 check "base AGENTS.md is given as a plain data file" "base conventions" "$(cat "$(cat "$S/claude.jobdir")/conventions/AGENTS.md.txt")"
-check "base .claude/rules is given as a data file" "rule one" "$(cat "$(cat "$S/claude.jobdir")/conventions/.claude__rules__r1.md.txt")"
+check "base .claude/rules is given as a data file, not hidden behind a leading dot" "rule one" "$(cat "$(cat "$S/claude.jobdir")/conventions/rules__r1.md.txt")"
 check "job log records subagent calls, parallelism, turns, duration, cost" 1 "$(grep -c '^stats: agent_calls=3 max_agents_in_one_message=3 num_turns=5 duration_ms=1234 cost_usd=0.5$' "$S/logs/"*review.log)"
 check "claude is asked for stream-json" 1 "$(grep -cxF stream-json "$S/claude.args")"
 check "diff and reviews are pre-fetched" 1 "$([ -s "$(cat "$S/claude.jobdir")/diff.patch" ] && [ -s "$(cat "$S/claude.jobdir")/reviews.json" ] && echo 1 || echo 0)"
@@ -175,6 +176,18 @@ FAKE_CLAUDE=review job
 check "never double-posts for the same head" 1 "$(nwrites 'POST .*reviews')"
 check "and says so" 1 "$(grep -c 'I did not post: I already reviewed this commit' "$S/notified")"
 
+echo "-- review: the user's own review skills add one parallel pass each"
+mkdir -p "$W/skills/money-lens"; echo 'Check money rounding.' >"$W/skills/money-lens/SKILL.md"
+jq --arg p "$W/skills/money-lens/SKILL.md" '. + {review_skills: [$p]}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+reset; ev review false; FAKE_CLAUDE=review job
+check "3 passes are not enough with one extra skill: fails, nothing posted" "1 0" "$(grep -c 'review needs 4 parallel passes but only 3' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+check "the skill is copied into the job dir under its folder name" "Check money rounding." "$(cat "$(cat "$S/claude.jobdir")/review-skills/1-money-lens.md")"
+reset; ev review false; FAKE_AGENTS=4 FAKE_CLAUDE=review job
+check "4 passes with one extra skill: posted" 1 "$(cat "$S/writes.log" | grep -c 'event=APPROVE')"
+jq '. + {review_skills: ["/no/such/SKILL.md"]}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+reset; ev review false; FAKE_CLAUDE=review job
+check "a missing review skill file fails loudly before claude runs" "1 0" "$(grep -c "review_skills entry '/no/such/SKILL.md' is not a readable file" "$S/notified") $([ -e "$S/claude.args" ] && echo 1 || echo 0)"
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
 echo "-- review: bad drafts and failures are loud, nothing is posted"
 reset; ev review false; FAKE_CLAUDE=review-long job
 check "over 150 words: asks for a shorter draft once, then posts the shortened review" "1 1" "$(cat "$S/logs/"*review.log | grep -c 'asking for a shorter one') $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
@@ -190,7 +203,7 @@ FAKE_CLAUDE=review-badverdict job
 check "third failure says giving up" 1 "$(grep -c 'attempt 3 of 3, giving up' "$S/notified")"
 reset; FAKE_CLAUDE=crash job; check "claude crash is reported" 1 "$(grep -c 'FAILED (attempt 1 of 3): claude exited with status 1' "$S/notified")"
 reset; ev review false; FAKE_AGENTS=2 FAKE_CLAUDE=review job
-check "fewer than three review passes fails loudly, nothing posted, retry recorded" "1 1 0" "$(grep -c 'FAILED (attempt 1 of 3): review needs three parallel passes but only 2 subagent call(s) ran' "$S/notified") $(grep -c 'live|review' "$S/failed.tsv") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+check "fewer than three review passes fails loudly, nothing posted, retry recorded" "1 1 0" "$(grep -c 'FAILED (attempt 1 of 3): review needs 3 parallel passes but only 2 subagent call(s) ran' "$S/notified") $(grep -c 'live|review' "$S/failed.tsv") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
 reset; ev review false deadbeef; FAKE_CLAUDE=review job
 check "head moved before start: quiet skip, no failure, no post" "0 0" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/failed.tsv" ] && echo 1 || echo 0)"
 reset; touch "$S/paused"; ev review false; FAKE_CLAUDE=review job; rm "$S/paused"
@@ -306,6 +319,7 @@ FAKE_CLAUDE=hang bash "$T/../scripts/job.sh" "$W/ev.json" & jp=$!
 for i in $(seq 1 50); do [ -s "$S/hang.pid" ] && break; sleep 0.1; done
 hp=$(cat "$S/hang.pid"); kill -TERM "$jp"; wait "$jp" 2>/dev/null; sleep 0.3
 check "pause/TERM kills claude's whole process group, including its children" "gone" "$(kill -0 "$hp" 2>/dev/null && echo alive || echo gone)"
+check "a click on the notification opens the PR" 1 "$(rm -f "$S/notified"; (. "$T/../scripts/lib.sh"; report "PR #5: done. https://github.com/acme/app/pull/5"); [ "$(uname)" = Darwin ] && grep -c -- '-open https://github.com/acme/app/pull/5' "$S/notified" || echo 1)"
 check "slack text is escaped" "&lt;!channel&gt; a&amp;b" "$(printf '<!channel> a&b' | (. "$T/../scripts/lib.sh"; slack_escape))"
 check "mentions are defanged" 'hi `@bob` and `@org/team`' "$(printf 'hi @bob and @org/team' | (. "$T/../scripts/lib.sh"; defang) | tr -d '\n')"
 jq -n '{repos: ([range(0;30) | {key: "some-organisation/a-rather-long-repository-name-\(.)", value: "/x"}] | from_entries)}' >"$W/c5.json"

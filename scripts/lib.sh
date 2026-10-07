@@ -13,9 +13,15 @@ is_paused() { [ -f "$STATE_DIR/paused" ]; }
 
 # report <message>: macOS notification (notify-send on Linux) plus Slack if configured.
 report() {
-  local msg=$1 hook
+  local msg=$1 hook url
   log "REPORT $msg"
-  if [ "$(uname)" = Darwin ]; then
+  # Click opens the PR: the last github.com link in the message. terminal-notifier can do that;
+  # osascript notifications only ever open Script Editor, so it is the fallback.
+  url=$(grep -oE 'https://github\.com/[^ ]+' <<<"$msg" | tail -1)
+  if [ "$(uname)" = Darwin ] && command -v terminal-notifier >/dev/null; then
+    terminal-notifier -title pr-autopilot -message "$msg" ${url:+-open "$url"} >/dev/null 2>&1 ||
+      log "terminal-notifier failed"
+  elif [ "$(uname)" = Darwin ]; then
     osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "pr-autopilot"' \
       -e 'end run' -- "$msg" >/dev/null 2>&1 || log "osascript failed"
   elif command -v notify-send >/dev/null; then

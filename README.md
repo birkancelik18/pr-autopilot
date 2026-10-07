@@ -2,7 +2,7 @@
 
 A Claude Code plugin that handles two chores on GitHub, as you:
 
-- Someone asks you to review a PR: it reviews it with three independent passes (bugs, security, project conventions), blends the findings and posts one APPROVE or REQUEST_CHANGES review.
+- Someone asks you to review a PR: it reviews it with three independent passes (bugs, security, project conventions) plus any review skills you add, blends the findings and posts one APPROVE or REQUEST_CHANGES review.
 - Someone requests changes (or leaves review comments) on a PR you wrote: it fixes the genuine points on your PR branch, pushes, replies on each thread and re-requests review.
 
 It is not a long-running agent. A tiny shell poller runs every 60 seconds, asks GitHub what needs you, and only starts a headless `claude -p` when there is a new event. Everything runs with your own `gh` login and your own `claude` login, so everything it posts appears as you and the usage counts against your own Claude plan. Each job works in a separate `git worktree`, never in your working copy. You get a macOS notification (and optionally a Slack message) for every outcome, failures included.
@@ -11,7 +11,7 @@ It is not a long-running agent. A tiny shell poller runs every 60 seconds, asks 
 
 ## Requirements
 
-`gh` (logged in: `gh auth login`), `claude` (logged in with your own account), `jq`, `git`, `bash`, and `curl` if you want Slack. macOS is the target; Linux works with a systemd user timer or cron. Each watched repo needs a local clone with an `origin` remote.
+`gh` (logged in: `gh auth login`), `claude` (logged in with your own account), `jq`, `git`, `bash`, `curl` if you want Slack, and on macOS `terminal-notifier` (`brew install terminal-notifier`) if you want a click on a notification to open the PR; without it notifications still appear but a click opens Script Editor. macOS is the target; Linux works with a systemd user timer or cron. Each watched repo needs a local clone with an `origin` remote.
 
 What it watches: the GitHub **search API** is the primary source, so it works even if you keep on-site GitHub notifications off. Each poll runs two searches over your configured repos: open PRs where review is requested from you (`review-requested:you`), and your own open PRs. GitHub notifications (unread, participating) are used as an optional extra source and to mark a notification read after a job succeeds. Limits: search covers requests addressed to you personally, not review requests that only went to a team.
 
@@ -35,7 +35,17 @@ Edit `~/.config/pr-autopilot/config.json` and set `"dry_run"`. No restart needed
 
 ## Config
 
-See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (setup writes false), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `trusted_commenters` (extra logins whose feedback may start a fix job, see below), `auto_approve_outsiders` (default false, see below), `max_parallel` (default 2), `max_cost_usd_per_job` (default 10; a notification is sent when a job's estimated cost exceeds it, nothing is stopped), `job_timeout_minutes` (default 30), `slack_webhook`, and the opt-in `run_local_tests_UNSAFE` (see Safety). Live mode needs `"dry_run": false` exactly; any other value, a missing key or an unreadable config means dry-run.
+See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (setup writes false), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `trusted_commenters` (extra logins whose feedback may start a fix job, see below), `auto_approve_outsiders` (default false, see below), `max_parallel` (default 2), `max_cost_usd_per_job` (default 10; a notification is sent when a job's estimated cost exceeds it, nothing is stopped), `job_timeout_minutes` (default 30), `slack_webhook`, `review_skills` (your own review lenses, see below), and the opt-in `run_local_tests_UNSAFE` (see Safety). Live mode needs `"dry_run": false` exactly; any other value, a missing key or an unreadable config means dry-run.
+
+## Add your own review skills
+
+Every review runs three built-in passes in parallel: bugs, security and data isolation, and the repo's own conventions. You can add more. Write the lens as a markdown file (a Claude Code `SKILL.md` works as is) and list its absolute path in the config:
+
+```json
+"review_skills": ["/Users/you/.claude/skills/money-review/SKILL.md", "/Users/you/review-lenses/i18n.md"]
+```
+
+Each file becomes one more pass, run in parallel with the built-in three. Its findings are blended into the same single review with the same rules: a finding needs a `file:line` and a concrete failure, and only real blockers request changes. The file is copied into the job, so it is your text giving instructions; the PR it looks at stays untrusted data, and the pass has the same read-only tools as the others (no shell, no network). A listed file that does not exist fails the job loudly instead of quietly reviewing without it. Changes to the file apply from the next review, no restart needed.
 
 ## How decisions are made
 

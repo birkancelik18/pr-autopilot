@@ -129,9 +129,28 @@ mkdir -p "$JOB/conventions"
 for f in AGENTS.md CLAUDE.md; do
   git -C "$clone" show "$BASEREF:$f" >"$JOB/conventions/$f.txt" 2>/dev/null || rm -f "$JOB/conventions/$f.txt"
 done
+# Named rules__<file>.txt: a leading dot would hide them from the model's file listing.
 git -C "$clone" ls-tree -r --name-only "$BASEREF" -- .claude/rules 2>/dev/null | while IFS= read -r f; do
-  git -C "$clone" show "$BASEREF:$f" >"$JOB/conventions/${f//\//__}.txt"
+  rel=${f#.claude/}
+  git -C "$clone" show "$BASEREF:$f" >"$JOB/conventions/${rel//\//__}.txt"
 done
+# The user's own review skills (config review_skills): one extra parallel pass each. They are the
+# user's text, not the PR's, so they are trusted instructions for that pass; copied into the job
+# dir because the model may not read outside it.
+npasses=3
+if [ "$kind" = review ]; then
+  mkdir -p "$JOB/review-skills"
+  i=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    p=${p/#\~/$HOME}
+    [ -f "$p" ] && [ -r "$p" ] || fail "review_skills entry '$p' is not a readable file (fix config.json)"
+    i=$((i + 1))
+    name=$(basename "$p"); [ "$name" = SKILL.md ] && name=$(basename "$(dirname "$p")").md
+    cp "$p" "$JOB/review-skills/$i-$name" || fail "could not copy review skill '$p'"
+  done < <(jq -r '(.review_skills // [])[]' "$CONFIG")
+  npasses=$((3 + i))
+fi
 
 # --- tools. Reads (Read/Grep/Glob) need no rule: dontAsk allows them only inside the working
 # directories, which are the worktree (cwd) and the job dir (--add-dir). Everything else is denied.
@@ -196,8 +215,8 @@ cost_check
 
 # =============================== review: post the draft ===============================
 finish_review() {
-  [ "${agent_calls:-0}" -ge 3 ] ||
-    fail "review needs three parallel passes but only ${agent_calls:-0} subagent call(s) ran (max in one message: ${agent_parallel:-0})"
+  [ "${agent_calls:-0}" -ge "$npasses" ] ||
+    fail "review needs $npasses parallel passes but only ${agent_calls:-0} subagent call(s) ran (max in one message: ${agent_parallel:-0})"
   [ -s "$JOB/draft.md" ] || fail "the model wrote no draft.md"
   local verdict verdict2 body_words why
   verdict=$(head -1 "$JOB/draft.md" | tr -d '\r')
