@@ -392,6 +392,16 @@ check "origin that does not match the configured repo: refused before fetch or p
 git -C "$W/clone" remote set-url origin https://github.com/acme/app.git
 reset; ev review false deadbeef; for i in 1 2 3; do FAKE_CLAUDE=review job; done
 check "a PR that keeps changing is reported on the 3rd quiet skip" 1 "$(grep -c 'Skipped 3 times because the PR keeps changing' "$S/notified")"
+if [ "$(uname)" = Darwin ]; then
+  rm -f "$S/notified"; jq -n '{repos: {"acme/app": "/x"}, notify_style: "notification"}' >"$W/c7.json"
+  out=$(PR_AUTOPILOT_CONFIG=$W/c7.json bash "$T/../scripts/install-scheduler.sh" notify-test)
+  check "setup with notify_style notification sends the test banner" "1 1" "$(grep -cx 'TN -title pr-autopilot -message test -open https://github.com' "$S/notified") $(grep -c 'Sent a test notification' <<<"$out")"
+  rm -f "$S/notified"; out=$(FAKE_TN_EXIT=3 PR_AUTOPILOT_CONFIG=$W/c7.json bash "$T/../scripts/install-scheduler.sh" notify-test)
+  check "blocked by macOS: tells the user where to allow it" 1 "$(grep -c 'System Settings > Notifications > terminal-notifier' <<<"$out")"
+  jq -n '{repos: {"acme/app": "/x"}, notify_style: "window"}' >"$W/c8.json"
+  rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
+  check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
+fi
 check "uninstall and install both clear a leftover pause" 2 "$(grep -c 'rm -f "$STATE/paused"' "$T/../scripts/install-scheduler.sh")"
 check "plist PATH is XML-escaped" 1 "$(PATH='/a&b:/usr/bin:/bin' bash "$T/../scripts/install-scheduler.sh" print-plist | grep -c '/a&amp;b')"
 

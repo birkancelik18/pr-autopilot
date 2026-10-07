@@ -50,6 +50,22 @@ live_jobs() { # any job still running?
   return 1
 }
 
+# With notify_style "notification", send one test banner: it makes macOS ask for (or list)
+# terminal-notifier's permission, and shows the user whether a click opens a link.
+notify_test() {
+  local cfg=${PR_AUTOPILOT_CONFIG:-$HOME/.config/pr-autopilot/config.json}
+  [ "$(jq -r '.notify_style // "window"' "$cfg" 2>/dev/null)" = notification ] || return 0
+  if ! command -v terminal-notifier >/dev/null; then
+    echo "notify_style is notification but terminal-notifier is missing: brew install terminal-notifier"
+    return 0
+  fi
+  if terminal-notifier -title pr-autopilot -message "test" -open https://github.com >/dev/null 2>&1; then
+    echo "Sent a test notification: click it, it should open github.com."
+  else
+    echo "macOS blocked the test notification. Allow it in System Settings > Notifications > terminal-notifier, then re-run setup. Until then notifications still show, but a click opens Script Editor."
+  fi
+}
+
 install() {
   for c in gh jq git claude; do command -v "$c" >/dev/null || { echo "missing: $c" >&2; exit 1; }; done
   mkdir -p "$BASE" "$STATE"
@@ -71,6 +87,7 @@ install() {
     for i in 1 2 3 4 5 6; do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break; sleep 1; done
     launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || { echo "launchd did not load $LABEL" >&2; exit 1; }
     echo "Installed launchd job $LABEL (every 60s)."
+    notify_test
   elif command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
     mkdir -p "$UNIT_DIR"
     render_unit >"$UNIT_DIR/pr-autopilot.service"
@@ -127,6 +144,7 @@ uninstall() {
 
 case ${1:-} in
   install) install ;;
+  notify-test) notify_test ;;
   uninstall) uninstall ;;
   print-plist) render_plist ;;
   print-unit) render_unit ;;
