@@ -11,7 +11,7 @@ It is not a long-running agent. A tiny shell poller runs every 60 seconds, asks 
 
 ## Requirements
 
-`gh` (logged in: `gh auth login`), `claude` (logged in with your own account), `jq`, `git`, `bash`, `curl` if you want Slack, and on macOS `terminal-notifier` (`brew install terminal-notifier`) if you want a click on a notification to open the PR; without it notifications still appear but a click opens Script Editor. macOS is the target; Linux works with a systemd user timer or cron. Each watched repo needs a local clone with an `origin` remote.
+`gh` (logged in: `gh auth login`), `claude` (logged in with your own account), `jq`, `git`, `bash`, `curl` if you want Slack. macOS is the target; Linux works with a systemd user timer or cron. Each watched repo needs a local clone with an `origin` remote.
 
 What it watches: the GitHub **search API** is the primary source, so it works even if you keep on-site GitHub notifications off. Each poll runs two searches over your configured repos: open PRs where review is requested from you (`review-requested:you`), and your own open PRs. GitHub notifications (unread, participating) are used as an optional extra source and to mark a notification read after a job succeeds. Limits: search covers requests addressed to you personally, not review requests that only went to a team.
 

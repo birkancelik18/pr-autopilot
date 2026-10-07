@@ -30,8 +30,11 @@ clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downc
 if [ "$kind" = review ]; then what="$who asked you to review it"
 elif [ "$cr" = true ]; then what="$who requested changes on yours"
 else what="$who commented on yours"; fi
+# The PR link leads the notification: a click cannot open it, so it has to be readable.
 prefix="PR #$n ($title): $what."
 [ "$dry" = true ] && prefix="[DRY RUN] $prefix"
+prefix="$url
+$prefix"
 
 cpid="" wd="" posted=0
 stop_wd() { [ -n "$wd" ] && { pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wd=""; }; }
@@ -54,11 +57,11 @@ fail() { # fail <message>: loud report; retried by the poller (max 3) unless we 
   echo "FAILED: $1" >>"$LOG"
   if [ "$posted" = 1 ]; then
     echo "$DKEY" >>"$STATE_DIR/handled.tsv" # a repeat could double-post
-    report "$prefix PARTLY DONE, then FAILED: $1. Not retried automatically, check the PR. Log: $LOG. $url"
+    report "$prefix PARTLY DONE, then FAILED: $1. Not retried automatically, check the PR. Log: $LOG."
   else
     printf '%s\t%s\n' "$(date +%s)" "$DKEY" >>"$STATE_DIR/failed.tsv"
     nf=$(awk -F'\t' -v k="$DKEY" '$2 == k' "$STATE_DIR/failed.tsv" | wc -l | tr -d ' ')
-    report "$prefix FAILED (attempt $nf of 3$([ "$nf" -ge 3 ] && echo ", giving up")): $1. Log: $LOG. $url"
+    report "$prefix FAILED (attempt $nf of 3$([ "$nf" -ge 3 ] && echo ", giving up")): $1. Log: $LOG."
   fi
   exit 1
 }
@@ -67,7 +70,7 @@ succeed() { # succeed <outcome verified on GitHub>
   if [ "$mode" = live ] && [ -n "$thread" ]; then
     gh api -X PATCH "notifications/threads/$thread" >/dev/null 2>&1 || log "could not mark $thread read"
   fi
-  report "$prefix $1 $url"
+  report "$prefix $1"
   exit 0
 }
 # The PR changed under us: nothing was written and the poller starts over with fresh data. If that
@@ -76,7 +79,7 @@ skip_quietly() {
   echo "$1" >>"$LOG"; log "$repo#$n: $1"
   echo "$DKEY" >>"$STATE_DIR/quiet.tsv"
   [ "$(grep -cxF "$DKEY" "$STATE_DIR/quiet.tsv")" -lt 3 ] ||
-    report "$prefix Skipped $(grep -cxF "$DKEY" "$STATE_DIR/quiet.tsv") times because the PR keeps changing ($1). $url"
+    report "$prefix Skipped $(grep -cxF "$DKEY" "$STATE_DIR/quiet.tsv") times because the PR keeps changing ($1)."
   exit 0
 }
 live_now() { # config must still say dry_run is exactly false at the moment of any write

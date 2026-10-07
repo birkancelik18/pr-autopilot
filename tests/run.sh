@@ -12,7 +12,6 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
-cp "$W/bin/osascript" "$W/bin/terminal-notifier"
 chmod +x "$W/bin/"* "$T/fake-job"
 export PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
 S=$PR_AUTOPILOT_STATE
@@ -163,6 +162,7 @@ check "job log records subagent calls, parallelism, turns, duration, cost" 1 "$(
 check "claude is asked for stream-json" 1 "$(grep -cxF stream-json "$S/claude.args")"
 check "diff and reviews are pre-fetched" 1 "$([ -s "$(cat "$S/claude.jobdir")/diff.patch" ] && [ -s "$(cat "$S/claude.jobdir")/reviews.json" ] && echo 1 || echo 0)"
 check "dry-run writes nothing to GitHub" 0 "$([ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0)"
+check "the PR link is the first line of the notification, the outcome the next" "1 1" "$(grep -c -- ' -- https://x/11$' "$S/notified") $(grep -A1 -- ' -- https://x/11$' "$S/notified" | grep -c '^\[DRY RUN\] PR #11')"
 check "dry-run reports what it would have done" 1 "$(grep -c '\[DRY RUN\] PR #11 (PR 11 title): alice asked you to review it. I would have posted APPROVE: No blockers found. (nothing was posted)' "$S/notified")"
 check "success is recorded as handled" 1 "$(grep -cxF "dry|review|acme/app|11|$SHA" "$S/handled.tsv")"
 check "worktree is cleaned up" 0 "$(git -C "$W/clone" worktree list | grep -c pr-autopilot)"
@@ -319,10 +319,6 @@ FAKE_CLAUDE=hang bash "$T/../scripts/job.sh" "$W/ev.json" & jp=$!
 for i in $(seq 1 50); do [ -s "$S/hang.pid" ] && break; sleep 0.1; done
 hp=$(cat "$S/hang.pid"); kill -TERM "$jp"; wait "$jp" 2>/dev/null; sleep 0.3
 check "pause/TERM kills claude's whole process group, including its children" "gone" "$(kill -0 "$hp" 2>/dev/null && echo alive || echo gone)"
-check "a click on the notification opens the PR" 1 "$(rm -f "$S/notified"; (. "$T/../scripts/lib.sh"; report "PR #5: done. https://github.com/acme/app/pull/5"); [ "$(uname)" = Darwin ] && grep -c -- '-open https://github.com/acme/app/pull/5' "$S/notified" || echo 1)"
-printf '#!/usr/bin/env bash\nexit 3\n' >"$W/bin/terminal-notifier"
-check "terminal-notifier not allowed yet: the osascript notification still shows" 1 "$(rm -f "$S/notified"; (. "$T/../scripts/lib.sh"; report "PR #6: done."); [ "$(uname)" = Darwin ] && grep -c 'PR #6: done.' "$S/notified" || echo 1)"
-cp "$W/bin/osascript" "$W/bin/terminal-notifier"
 check "slack text is escaped" "&lt;!channel&gt; a&amp;b" "$(printf '<!channel> a&b' | (. "$T/../scripts/lib.sh"; slack_escape))"
 check "mentions are defanged" 'hi `@bob` and `@org/team`' "$(printf 'hi @bob and @org/team' | (. "$T/../scripts/lib.sh"; defang) | tr -d '\n')"
 jq -n '{repos: ([range(0;30) | {key: "some-organisation/a-rather-long-repository-name-\(.)", value: "/x"}] | from_entries)}' >"$W/c5.json"
