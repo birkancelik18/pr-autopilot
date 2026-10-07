@@ -24,6 +24,10 @@ report() {
   url=$(head -1 <<<"$msg" | grep -oE '^https://[^ ]+$')
   body=$(tail -n +2 <<<"$msg")
   style=$(cfg '.notify_style // "window"' 2>/dev/null || echo window)
+  # Unread list for the user's Claude Code chats (scripts/inbox.sh: hook and /pr-autopilot:watch).
+  jq -nc --arg at "$(date -u +%FT%TZ)" --arg url "$url" --arg text "${body:-$msg}" \
+    '{at: $at, url: $url, text: $text}' >>"$STATE_DIR/inbox.jsonl" 2>/dev/null ||
+    log "could not write inbox.jsonl"
   if [ "$(uname)" = Darwin ] && [ -n "$url" ] && [ "$style" = notification ] &&
     command -v terminal-notifier >/dev/null &&
     terminal-notifier -title pr-autopilot -message "$body" -open "$url" >/dev/null 2>&1; then
@@ -96,6 +100,11 @@ gc() {
   fi
   find "$STATE_DIR/logs" "$STATE_DIR/jobs" "$STATE_DIR/events" -mindepth 1 -maxdepth 1 -mtime +14 \
     -exec rm -rf {} + 2>/dev/null
+  # Empty the chat inbox once everything in it was shown and it got long.
+  if [ -f "$STATE_DIR/inbox.jsonl" ] && [ "$(wc -l <"$STATE_DIR/inbox.jsonl")" -gt 500 ] &&
+    [ "$(cat "$STATE_DIR/inbox.read" 2>/dev/null || echo 0)" -ge "$(wc -l <"$STATE_DIR/inbox.jsonl")" ]; then
+    : >"$STATE_DIR/inbox.jsonl"; echo 0 >"$STATE_DIR/inbox.read"
+  fi
   if [ "$(wc -c <"$STATE_DIR/polls.log" 2>/dev/null || echo 0)" -gt 1000000 ]; then
     tail -n 2000 "$STATE_DIR/polls.log" >"$STATE_DIR/polls.log.tmp" &&
       mv "$STATE_DIR/polls.log.tmp" "$STATE_DIR/polls.log"

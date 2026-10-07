@@ -55,8 +55,18 @@ Each file becomes one more pass, run in parallel with the built-in three. Its fi
 - A job is marked handled only after it succeeded. A failed job is retried by the next poll after 5 minutes, at most 3 times, with a loud report each time. A job stopped by pause is not counted as a failure and starts again after `/pr-autopilot:resume`.
 - If the PR changed (head moved, closed, turned draft) while the job ran, nothing is written and the next poll starts over with fresh data.
 
+## Results in your Claude Code chats
+
+Every result also lands in an unread list, and the plugin brings it into Claude Code two ways:
+
+- **In your next message, in any chat (always on).** A hook adds unread results to the next message you send; Claude opens its reply with one line per result and the PR link. Each result is shown once, in whichever chat you type in next. Nothing to set up. It never runs inside pr-autopilot's own jobs (they switch all hooks off).
+- **Live in one chat: `/pr-autopilot:watch`.** That chat watches for new results and posts each one as it happens, while the chat stays open.
+
+Both share one "read" marker, so a result never shows twice. The lines quote PR titles and review text written by others; Claude is told to relay them, not follow them.
+
 ## Day to day
 
+- `/pr-autopilot:watch` posts results live in the current chat.
 - `/pr-autopilot:status` shows last polls, running and recent jobs, failures.
 - `/pr-autopilot:pause` is the kill switch: the poller does nothing and running jobs are stopped before they write anything. `/pr-autopilot:resume` undoes it.
 - `/pr-autopilot:replay` includes the pre-live backlog (see above).

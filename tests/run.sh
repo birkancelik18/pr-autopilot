@@ -327,6 +327,19 @@ PR #5: done."); }
   rep; check "notify_style notification: a banner whose click opens the PR" 1 "$(grep -c '^TN -title pr-autopilot -message PR #5: done. -open https://github.com/acme/app/pull/5$' "$S/notified")"
   FAKE_TN_EXIT=3 rep; check "terminal-notifier not allowed yet: a plain notification with the link still shows" "1 1" "$(grep -c 'display notification.* -- https://github.com/acme/app/pull/5$' "$S/notified") $(grep -cx 'PR #5: done.' "$S/notified")"
 fi
+echo "-- chat inbox: results reach the user's Claude Code chats once"
+IB="$T/../scripts/inbox.sh"; rm -f "$S/inbox.jsonl" "$S/inbox.read"
+(. "$T/../scripts/lib.sh"; report "https://github.com/acme/app/pull/7
+PR #7 (T): bob requested changes on yours. I fixed x, pushed abc1234.")
+hk=$(bash "$IB" hook)
+check "hook: the unread result becomes context for the reply, text and link" 1 "$(jq -r .hookSpecificOutput.additionalContext <<<"$hk" | grep -c '^- PR #7 (T): bob requested changes on yours. I fixed x, pushed abc1234. (https://github.com/acme/app/pull/7)$')"
+check "hook: it is a UserPromptSubmit hook output" UserPromptSubmit "$(jq -r .hookSpecificOutput.hookEventName <<<"$hk")"
+check "hook: already shown, so the next message gets nothing" "" "$(bash "$IB" hook)"
+(. "$T/../scripts/lib.sh"; report "pr-autopilot: GitHub search failed")
+check "watch tick: a new result prints once, also when it has no PR link" "- pr-autopilot: GitHub search failed" "$(bash "$IB" once)"
+check "and is then read for the hook too" "" "$(bash "$IB" hook)"
+rm -f "$S/inbox.jsonl"; check "hook with no inbox at all: silent, exit 0" "0 " "$(bash "$IB" hook; echo "$? $(bash "$IB" hook)")"
+check "plugin hooks.json wires UserPromptSubmit to inbox.sh hook" 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/inbox.sh" hook' "$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$T/../hooks/hooks.json")"
 check "slack text is escaped" "&lt;!channel&gt; a&amp;b" "$(printf '<!channel> a&b' | (. "$T/../scripts/lib.sh"; slack_escape))"
 check "mentions are defanged" 'hi `@bob` and `@org/team`' "$(printf 'hi @bob and @org/team' | (. "$T/../scripts/lib.sh"; defang) | tr -d '\n')"
 jq -n '{repos: ([range(0;30) | {key: "some-organisation/a-rather-long-repository-name-\(.)", value: "/x"}] | from_entries)}' >"$W/c5.json"
