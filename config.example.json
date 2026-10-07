@@ -2,7 +2,7 @@
   "repos": {
     "your-org/your-repo": "/Users/you/code/your-repo"
   },
-  "dry_run": true,
+  "dry_run": false,
   "review_enabled": true,
   "fix_enabled": true,
   "allow_forks": false,

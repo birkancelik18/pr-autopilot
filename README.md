@@ -25,17 +25,17 @@ claude                                                   # then run: /pr-autopil
 
 `/pr-autopilot:setup` checks your logins, asks which repos to watch and where their clones are, writes `~/.config/pr-autopilot/config.json`, and installs the 60-second launchd job (macOS) or systemd timer / cron entry (Linux). The scheduler runs a copy of the plugin kept under `~/.local/share/pr-autopilot/`; re-run setup after updating the plugin to refresh it.
 
-## Try it in dry-run
+## Live by default, dry-run to try it
 
-Setup leaves `"dry_run": true`. In dry-run the jobs do the full review or fix and then stop: nothing is posted, nothing is pushed, your notifications are not marked read. You still get the notification with what it would have done ("I would have posted REQUEST_CHANGES: ...") and the full log in `~/.local/state/pr-autopilot/logs/`. Ask a colleague to request your review on a test PR, wait a minute, and check `/pr-autopilot:status`.
+Setup writes `"dry_run": false`: from the next poll it posts and pushes as you. It does not replay the backlog: only PRs updated after setup are acted on. To try it without posting first, set `"dry_run": true` (no restart needed). In dry-run the jobs do the full review or fix and then stop: nothing is posted, nothing is pushed, your notifications are not marked read. You still get the notification with what it would have done ("I would have posted REQUEST_CHANGES: ...") and the full log in `~/.local/state/pr-autopilot/logs/`. Ask a colleague to request your review on a test PR, wait a minute, and check `/pr-autopilot:status`.
 
-## Turn on posting
+## Switching between dry-run and live
 
-Edit `~/.config/pr-autopilot/config.json` and set `"dry_run": false`. No restart needed. Going live does **not** replay the backlog: only PRs updated after the moment you switched are acted on, so ten old review requests do not become ten reviews at once. Run `/pr-autopilot:replay` if you want the backlog processed too.
+Edit `~/.config/pr-autopilot/config.json` and set `"dry_run"`. No restart needed. Going live does **not** replay the backlog: only PRs updated after the moment you switched are acted on, so ten old review requests do not become ten reviews at once. Run `/pr-autopilot:replay` if you want the backlog processed too.
 
 ## Config
 
-See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (default true), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `trusted_commenters` (extra logins whose feedback may start a fix job, see below), `auto_approve_outsiders` (default false, see below), `max_parallel` (default 2), `max_cost_usd_per_job` (default 10; a notification is sent when a job's estimated cost exceeds it, nothing is stopped), `job_timeout_minutes` (default 30), `slack_webhook`, and the opt-in `run_local_tests_UNSAFE` (see Safety). Live mode needs `"dry_run": false` exactly; any other value, a missing key or an unreadable config means dry-run.
+See `config.example.json`. `repos` maps `owner/name` to the local clone path. Other keys: `dry_run` (setup writes false), `review_enabled`, `fix_enabled` (default true), `allow_forks` (review PRs from forks, default false), `ignore_authors` (extra bot logins whose reviews and comments are ignored; logins ending in `[bot]` always are), `trusted_commenters` (extra logins whose feedback may start a fix job, see below), `auto_approve_outsiders` (default false, see below), `max_parallel` (default 2), `max_cost_usd_per_job` (default 10; a notification is sent when a job's estimated cost exceeds it, nothing is stopped), `job_timeout_minutes` (default 30), `slack_webhook`, and the opt-in `run_local_tests_UNSAFE` (see Safety). Live mode needs `"dry_run": false` exactly; any other value, a missing key or an unreadable config means dry-run.
 
 ## How decisions are made
 
