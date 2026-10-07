@@ -314,9 +314,19 @@ finish_fix() {
   done
   summary=$(jq -r '.summary' "$r" | cut -c1-200)
   nreplies=$(jq '.replies | length' "$r")
+  # Re-request: whoever the model lists, plus every human whose latest review requests changes,
+  # once this job fixed or answered something (a declined point still deserves their look).
+  local want acted=false
+  { [ "$dirty" -gt 0 ] || [ "$nreplies" -gt 0 ]; } && acted=true
+  want=$(jq -r --slurpfile rv "$JOB/reviews.json" --arg me "$me" --argjson acted "$acted" '
+    ($rv[0] | map(select(.state != "PENDING")) | group_by(.user.login) | map(max_by(.id))
+      | map(select(.state == "CHANGES_REQUESTED") | .user.login)) as $cr
+    | [.re_request[], (if $acted then $cr[] else empty end)]
+    | map(select(. != $me and (endswith("[bot]") | not)))
+    | map(select(. as $l | $rv[0] | any(.user.login == $l))) | unique | .[]' "$r")
   check_head
   if [ "$dry" = true ]; then
-    local lg; lg=$(jq -r '.re_request | map("@" + .) | join(", ")' "$r")
+    local lg; lg=$(for l in $want; do printf '@%s ' "$l"; done | sed 's/ $//; s/ /, /g')
     succeed "I would have $([ "$dirty" -gt 0 ] && echo "fixed: $summary ($dirty files), pushed, ")replied on $nreplies thread(s)$([ -n "$lg" ] && echo ", re-requested review from $lg") (nothing was pushed or posted)."
   fi
   live_now
@@ -350,10 +360,7 @@ finish_fix() {
     else errs="$errs reply $((idx + 1)) failed;"; fi
   done
 
-  local want args=() l missing=""
-  want=$(jq -r --slurpfile rv "$JOB/reviews.json" --arg me "$me" '[.re_request[]
-    | select(. != $me and (endswith("[bot]") | not))
-    | select(. as $l | $rv[0] | any(.user.login == $l))] | unique | .[]' "$r")
+  local args=() l missing=""
   if [ -n "$want" ]; then
     for l in $want; do args+=(-f "reviewers[]=$l"); done
     posted=1

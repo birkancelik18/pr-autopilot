@@ -42,13 +42,13 @@ Valid JSON, exactly this shape:
     {"in_reply_to": 12345, "body": "Fixed in {{sha}}: added the check."},
     {"in_reply_to": null, "body": "Reply to a top-level comment or review body."}
   ],
-  "re_request": ["login-of-reviewer-whose-points-are-all-addressed"]
+  "re_request": ["login-of-reviewer-you-fixed-or-answered"]
 }
 ```
 
 - `files` lists every file you changed (relative paths). Only these files are committed; anything else you touched is discarded. Empty when you changed nothing.
 - One reply per open point that needs an answer: either what you changed (write `{{sha}}` where the commit's short sha belongs; the script fills it in) or why you did not. One or two plain sentences, no thanks, no emoji. `in_reply_to` is the id of an inline comment from `comments.json`, or null for review-body and top-level points. Do not reply to pure thanks. There is a hard cap: no more replies than open human comments, at most 20. Do not write @mentions.
-- `re_request` lists only reviewers (people, never bots) whose points you all fixed. Leave out anyone whose point you declined.
+- `re_request` lists every reviewer (people, never bots) whose points you fixed or answered, including a point you declined: they should see your reply. The script also adds anyone whose latest review requests changes.
 - If nothing is genuine, make no edits, give `"summary": "nothing"`, and explain in the replies.
 
 Then stop; your final message can be one line.

@@ -215,6 +215,9 @@ check "agent config files were not deleted by the commit" 0 "$(git -C "$O" diff 
 check "reply posted on the thread with the real short sha" "POST repos/acme/app/pulls/11/comments/5001/replies body=Fixed in ${new:0:7}, thanks "'`@bob`.' "$(grep 'replies' "$S/writes.log")"
 check "re-request only for actual reviewers (stranger dropped)" "POST repos/acme/app/pulls/11/requested_reviewers bob" "$(grep requested_reviewers "$S/writes.log")"
 check "report states verified facts" 1 "$(grep -c "I fixed the missing null check, pushed ${new:0:7}, replied on 1 thread(s), re-requested review from @bob (verified on GitHub)" "$S/notified")"
+echo "-- fix: a reviewer who requested changes is re-requested even when a point was declined"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-decline job
+check "bob (latest review CHANGES_REQUESTED) re-requested although the model listed nobody" "POST repos/acme/app/pulls/11/requested_reviewers bob" "$(grep requested_reviewers "$S/writes.log")"
 echo "-- fix: malformed result writes nothing"
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
 FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-badreply job
