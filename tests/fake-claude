@@ -22,6 +22,14 @@ case "${FAKE_CLAUDE:-review}" in
  "replies": [{"in_reply_to": 5001, "body": "Fixed in {{sha}}, thanks @bob."}], "re_request": ["bob", "stranger"]}
 J
     ;;
+  conflict | conflict-markers | conflict-unresolved | conflict-stray)
+    while IFS= read -r f; do
+      case $FAKE_CLAUDE in conflict-markers) ;; *) printf 'main side\npr side\n' >"$f" ;; esac
+    done <"$jd/conflicts.txt"
+    [ "$FAKE_CLAUDE" = conflict-stray ] && echo tampered >>src/other.txt
+    if [ "$FAKE_CLAUDE" = conflict-unresolved ]; then
+      echo '{"summary":"x","unresolved":[{"file":"src/a.txt","why":"both sides change the rule differently"}]}' >"$jd/result.json"
+    else echo '{"summary":"kept both lines","unresolved":[]}' >"$jd/result.json"; fi ;;
   fix-decline)
     echo fixed >>src/a.txt
     echo '{"summary":"x","files":["src/a.txt"],"replies":[{"in_reply_to":5001,"body":"Fixed one, declined the other: out of scope."}],"re_request":[]}' >"$jd/result.json" ;;

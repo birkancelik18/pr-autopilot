@@ -2,7 +2,7 @@
 # Args: --arg me --arg reason --arg repo
 #       --argjson ignore (extra bot logins) --argjson trusted (extra trusted commenters)
 #       --argjson via_search (true when the review request came from the search source)
-#       --argjson allow_forks/review_enabled/fix_enabled
+#       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled
 #       --slurpfile pr/reviews/comments/issue (each file holds one JSON value).
 # Output: {skip: why} or {kind: "review"|"fix", key, ...} plus PR facts for the job.
 def human: select(.user.login != $me and (.user.login | endswith("[bot]") | not)
@@ -19,8 +19,14 @@ def maxid: if length == 0 then null else max_by(.id) end;
     if $p.state != "open" or ($p.merged // false) then {skip: "closed or merged"}
     elif $p.draft then {skip: "draft"}
     elif $p.user.login == $me then
-      if ($fix_enabled | not) then {skip: "fix disabled"}
-      elif $fork then {skip: "own PR from a fork, cannot push"}
+      # Merge conflicts with the base: GitHub says "dirty". The key carries both shas, so a new
+      # conflict after the base moves again is a new job. Feedback is fixed first (see poll.sh).
+      (($conflict_enabled and ($p.mergeable_state // "") == "dirty")) as $dirty
+      | {conflict: $dirty, conflict_key: "conflict|\($repo)|\($p.number)|\($p.head.sha)|\($p.base.sha // "")"} as $cf
+      | if $fork then {skip: "own PR from a fork, cannot push"}
+      elif ($fix_enabled | not) then
+        if $dirty then {kind: "conflict", key: $cf.conflict_key, who: "the base branch"} + $cf
+        else {skip: "fix disabled"} end
       else
         # Each reviewer counts by their LATEST submitted review.
         ([$rv[] | human | select(trusted) | select(.state != "PENDING")] | group_by(.user.login) | map(max_by(.id))) as $latest
@@ -28,13 +34,15 @@ def maxid: if length == 0 then null else max_by(.id) end;
         | ([$rv[] | human | select(trusted) | select(.state == "COMMENTED" and ((.body // "") != ""))] | maxid) as $rc
         | ([$cm[] | human | select(trusted)] | maxid) as $c
         | ([$ic[] | human | select(trusted)] | maxid) as $i
-        | if ([$cr, $rc, $c, $i] | all(. == null)) then {skip: "nothing to address"}
+        | if ([$cr, $rc, $c, $i] | all(. == null)) then
+            if $dirty then {kind: "conflict", key: $cf.conflict_key, who: "the base branch"} + $cf
+            else {skip: "nothing to address"} end
           else {
             kind: "fix",
             key: "fix|\($repo)|\($p.number)|r\($cr.id // 0)-v\($rc.id // 0)-c\($c.id // 0)-i\($i.id // 0)",
             cr: ($cr != null),
             who: ([$cr, $rc, $c, $i] | map(select(. != null) | .user.login) | unique | join(", "))
-          } end
+          } + $cf end
       end
     elif $reason == "review_requested" then
       if ($review_enabled | not) then {skip: "review disabled"}

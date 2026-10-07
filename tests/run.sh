@@ -108,6 +108,11 @@ check "re-requested but head unchanged: not reviewed again" 1 "$(plog 'skip acme
 jq '.head.sha = "jjj111"' "$FIX/pr-20.json" >"$W/x" && mv "$W/x" "$FIX/pr-20.json"; bump 20
 FAKE_NOTIF_EMPTY=1 poll; check "head changed since my review: reviewed again" $((n2 + 4)) "$(jobs_n)"
 
+echo "== poller: once the feedback fix is done, a merge conflict is next"
+jq '.mergeable_state = "dirty" | .base.sha = "bbb000"' "$FIX/pr-12.json" >"$W/x" && mv "$W/x" "$FIX/pr-12.json"
+fk=$(grep '"fix","acme/app",12' "$S/jobs.log" | tail -1 | jq -r '.[5]'); echo "dry|$fk" >>"$S/handled.tsv"; bump 12
+n3=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
+check "fix already handled + PR dirty: a conflict job starts for #12" '"conflict" 12' "$([ "$(jobs_n)" -gt "$n3" ] && tail -1 "$S/jobs.log" | jq -r '"\"\(.[0])\" \(.[2])"')"
 echo "== scheduler files keep jobs alive after poll.sh exits"
 plist=$(bash "$T/../scripts/install-scheduler.sh" print-plist); unit=$(bash "$T/../scripts/install-scheduler.sh" print-unit)
 check "launchd plist has AbandonProcessGroup=true" 1 "$(grep -c '<key>AbandonProcessGroup</key><true/>' <<<"$plist")"
@@ -135,6 +140,7 @@ jq -n --arg c "$W/clone" '{repos: {"acme/app": $c}, dry_run: false}' >"$PR_AUTOP
 ev() { # ev <kind> <dry_run> [head]
   local key="review|acme/app|11|$SHA" who=alice cr=false
   [ "$1" = fix ] && { key="fix|acme/app|11|r901-v0-c5001-i0"; who=bob; cr=true; }
+  [ "$1" = conflict ] && { key="conflict|acme/app|11|${3:-$SHA}|base"; who="the base branch"; }
   jq -n --arg k "$1" --argjson d "$2" --arg a "${ASSOC:-MEMBER}" --arg h "${3:-$SHA}" --arg key "$key" --arg who "$who" --argjson cr "$cr" \
     '{kind:$k, key:$key, repo:"acme/app", number:11, head:$h, branch:"feature-11", base:"main",
       title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d}' >"$W/ev.json"
@@ -239,6 +245,33 @@ check "reply to a nonexistent comment id is rejected before any write" "1 0" "$(
 check "and the branch is untouched" "$SHA" "$(git -C "$O" rev-parse refs/heads/feature-11)"
 
 
+echo "== conflict: merge the base into the PR branch, resolve, push"
+# A real conflict: main and feature-11 both change the same file. Only the throwaway origin $O moves.
+mkconflict() { # mkconflict <file>: fresh conflicting commits on main and feature-11; sets PRH and MAINH
+  git -C "$O" checkout -q main && git -C "$O" reset -q --hard "$SHA"
+  printf 'main side\n' >"$O/$1"; echo keep >"$O/src/other.txt"; git -C "$O" add -A && git -C "$O" -c user.name=t -c user.email=t@t commit -q -m main-change
+  MAINH=$(git -C "$O" rev-parse HEAD)
+  git -C "$O" checkout -q -B feature-11 "$SHA"; printf 'pr side\n' >"$O/$1"; git -C "$O" add -A
+  git -C "$O" -c user.name=t -c user.email=t@t commit -q -m pr-change; PRH=$(git -C "$O" rev-parse HEAD)
+  git -C "$O" update-ref refs/pull/11/head "$PRH"; git -C "$O" checkout -q main
+}
+mkconflict src/a.txt; reset; ev conflict true "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict job
+check "dry-run: resolved but nothing pushed, says what it would do" "1 $PRH" "$(grep -c 'I would have merged main into your branch and resolved conflicts in 1 file(s) (src/a.txt): kept both lines and pushed (nothing was pushed)' "$S/notified") $(git -C "$O" rev-parse feature-11)"
+check "conflict job: edits only, no shell, no git" 0 "$(allow | grep -cE 'Bash|gh |git ')"
+reset; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict-stray job
+new=$(git -C "$O" rev-parse feature-11)
+check "live: the PR branch gets a merge commit of the PR head and main" "$PRH $MAINH" "$(git -C "$O" log -1 --format='%P' "$new")"
+check "the resolved file is what was committed" "main side|pr side" "$(git -C "$O" show "$new:src/a.txt" | paste -sd'|' -)"
+check "a non-conflicted file the model touched is put back" keep "$(git -C "$O" show "$new:src/other.txt")"
+check "report: merged, resolved, pushed, verified" 1 "$(grep -c "I merged main into your branch and resolved conflicts in 1 file(s) (src/a.txt): kept both lines, pushed ${new:0:7} (verified on GitHub)" "$S/notified")"
+mkconflict src/a.txt; reset; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict-markers job
+check "markers left: fails loudly, nothing pushed" "1 $PRH" "$(grep -c 'conflict markers or broken files left after resolving: src/a.txt' "$S/notified") $(git -C "$O" rev-parse feature-11)"
+reset; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict-unresolved job
+check "a real disagreement goes to the user: merge aborted, nothing pushed, handled" "1 $PRH 1" "$(grep -c 'I did not resolve the merge conflicts: src/a.txt: both sides change the rule differently. Please merge main in by hand' "$S/notified") $(git -C "$O" rev-parse feature-11) $(grep -c 'live|conflict' "$S/handled.tsv")"
+mkconflict AGENTS.md; reset; rm -f "$S/claude.args"; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict job
+check "a conflict in agent config is never given to the model" "1 0 $PRH" "$(grep -c 'these need you: AGENTS.md (agent config)' "$S/notified") $([ -e "$S/claude.args" ] && echo 1 || echo 0) $(git -C "$O" rev-parse feature-11)"
+git -C "$O" checkout -q main && git -C "$O" reset -q --hard "$SHA"; git -C "$O" update-ref refs/heads/feature-11 "$SHA"; git -C "$O" update-ref refs/pull/11/head "$SHA"
+
 echo "== safety: fix job has no shell, commits only listed files"
 reset_fix() { git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; rm -f "$S/logs/"*; }
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
@@ -271,7 +304,7 @@ echo "== safety: only trusted feedback starts a fix, stale notifications do not 
 cls() { # cls <pr> <reviews> <comments> <issue> <reason> <via_search>
   jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason "$5" --arg repo acme/app --argjson ignore '[]' \
     --argjson trusted "${TRUSTED:-[]}" --argjson via_search "$6" --argjson allow_forks false --argjson review_enabled true \
-    --argjson fix_enabled true --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4"
+    --argjson fix_enabled true --argjson conflict_enabled "${CONFLICT:-true}" --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4"
 }
 echo '[]' >"$W/empty.json"
 for assoc in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR; do
@@ -282,6 +315,12 @@ for assoc in OWNER MEMBER COLLABORATOR; do
   echo "[{\"id\":9,\"user\":{\"login\":\"pal\"},\"author_association\":\"$assoc\",\"body\":\"please add x\"}]" >"$W/c.json"
   check "feedback from a $assoc starts a fix" fix "$(cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r .kind)"
 done
+echo '[{"id":9,"user":{"login":"rando"},"author_association":"NONE","body":"x"}]' >"$W/c.json"
+jq '.mergeable_state = "dirty" | .base.sha = "bbb000"' "$FIX/pr-18.json" >"$W/pr-dirty.json"
+check "own PR with a merge conflict and no feedback: a conflict job keyed on head and base" "conflict conflict|acme/app|18|hhh888|bbb000" "$(cls "$W/pr-dirty.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r '"\(.kind) \(.key)"')"
+check "conflict_enabled false: no conflict job" "nothing to address" "$(CONFLICT=false cls "$W/pr-dirty.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r .skip)"
+echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
+check "conflict plus feedback: the fix runs first, the conflict is carried along" "fix true" "$(cls "$W/pr-dirty.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '"\(.kind) \(.conflict)"')"
 echo '[{"id":9,"user":{"login":"rando"},"author_association":"NONE","body":"x"}]' >"$W/c.json"
 check "trusted_commenters can vouch for an outsider" fix "$(TRUSTED='["rando"]' cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r .kind)"
 jq '.requested_reviewers = []' "$FIX/pr-11.json" >"$W/pr-stale.json"

@@ -28,6 +28,7 @@ echo "# $stamp $kind $repo#$n head=$head dry_run=$dry" >"$LOG"
 clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downcase == ($r | ascii_downcase)) | .value' "$CONFIG")
 
 if [ "$kind" = review ]; then what="$who asked you to review it"
+elif [ "$kind" = conflict ]; then what="yours has merge conflicts with $base"
 elif [ "$cr" = true ]; then what="$who requested changes on yours"
 else what="$who commented on yours"; fi
 # The PR link leads the notification: a click cannot open it, so it has to be readable.
@@ -155,6 +156,32 @@ if [ "$kind" = review ]; then
   npasses=$((3 + i))
 fi
 
+# --- merge conflict: merge the base into the PR head here; the model resolves only what conflicts.
+# Agent config, binary and deleted-on-one-side files are never handed to the model: the user gets them.
+# --no-commit runs no git hooks; the commit in finish_conflict switches them off like the fix path.
+skip_model=""
+if [ "$kind" = conflict ]; then
+  git -C "$WT" merge --no-ff --no-commit "$BASEREF" >>"$LOG" 2>&1; mrc=$?
+  git -C "$WT" diff --name-only --diff-filter=U >"$JOB/conflicts.txt"
+  if [ ! -s "$JOB/conflicts.txt" ]; then
+    [ "$mrc" -eq 0 ] || fail "git merge of $base failed without conflicts (see log)"
+    skip_model=1 # merged cleanly here; nothing for the model to resolve
+  else
+    why=""
+    while IFS= read -r f; do
+      case "/$f" in
+        */CLAUDE.md | */CLAUDE.local.md | */AGENTS.md | */.mcp.json | */.claude/*) why="$why $f (agent config)" ;;
+        *) if [ ! -f "$WT/$f" ]; then why="$why $f (deleted on one side)"
+           elif ! LC_ALL=C grep -qI '' "$WT/$f"; then why="$why $f (binary)"; fi ;;
+      esac
+    done <"$JOB/conflicts.txt"
+    if [ -n "$why" ]; then
+      git -C "$WT" merge --abort >>"$LOG" 2>&1
+      succeed "I did not resolve the merge conflicts: these need you:$why. Please merge $base in by hand."
+    fi
+  fi
+fi
+
 # --- tools. Reads (Read/Grep/Glob) need no rule: dontAsk allows them only inside the working
 # directories, which are the worktree (cwd) and the job dir (--add-dir). Everything else is denied.
 deny=("Bash(gh *)" "Bash(git *)" "Bash(curl *)" "Bash(wget *)" "Bash(ssh *)" "Bash(scp *)"
@@ -163,6 +190,9 @@ deny=("Bash(gh *)" "Bash(git *)" "Bash(curl *)" "Bash(wget *)" "Bash(ssh *)" "Ba
 if [ "$kind" = review ]; then
   allow=(Agent "Edit(/$JOB/draft.md)")
   skill=review-pr
+elif [ "$kind" = conflict ]; then
+  allow=("Edit(/$WT/**)" "Edit(/$JOB/result.json)")
+  skill=resolve-conflicts
 else
   # No Bash at all: the model only edits files. The script commits, pushes and (opt-in, sandboxed) tests.
   allow=("Edit(/$WT/**)" "Edit(/$JOB/result.json)")
@@ -199,22 +229,24 @@ cost_check() {
     report "$prefix Cost warning: this job cost about \$$total_cost, over max_cost_usd_per_job=$max (nothing was stopped). Log: $LOG"
   return 0
 }
-run_claude "$prompt" "$JOB/claude.jsonl"
-cp "$JOB/claude.jsonl.result" "$JOB/claude.json"
-jq -r '.result // empty' "$JOB/claude.json" >>"$LOG" 2>/dev/null
-# Per-job evidence of what actually ran: subagent (Agent tool) calls, how many in one message, turns, time, cost.
-agent_calls=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null) | .message.content[]?
-  | select(.type == "tool_use" and (.name == "Agent" or .name == "Task")) | .id] | unique | length' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
-agent_parallel=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null)
-  | {m: .message.id, c: [.message.content[]? | select(.type == "tool_use" and (.name == "Agent" or .name == "Task")) | .id]}]
-  | group_by(.m) | map(map(.c[]) | unique | length) | max // 0' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
-echo "stats: agent_calls=${agent_calls:-0} max_agents_in_one_message=${agent_parallel:-0} $(jq -r '"num_turns=\(.num_turns) duration_ms=\(.duration_ms) cost_usd=\(.total_cost_usd)"' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
-echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
-[ "$rc" -eq 0 ] || fail "claude exited with status $rc (143 or 137 usually means the timeout)"
-[ "$(jq -r '.is_error // false' "$JOB/claude.json" 2>/dev/null)" = false ] ||
-  fail "claude reported an error: $(jq -r '.result // "?"' "$JOB/claude.json" | head -c 200)"
+if [ -z "$skip_model" ]; then
+  run_claude "$prompt" "$JOB/claude.jsonl"
+  cp "$JOB/claude.jsonl.result" "$JOB/claude.json"
+  jq -r '.result // empty' "$JOB/claude.json" >>"$LOG" 2>/dev/null
+  # Per-job evidence of what actually ran: subagent (Agent tool) calls, how many in one message, turns, time, cost.
+  agent_calls=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null) | .message.content[]?
+    | select(.type == "tool_use" and (.name == "Agent" or .name == "Task")) | .id] | unique | length' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
+  agent_parallel=$(jq -s '[.[] | select(.type == "assistant" and .parent_tool_use_id == null)
+    | {m: .message.id, c: [.message.content[]? | select(.type == "tool_use" and (.name == "Agent" or .name == "Task")) | .id]}]
+    | group_by(.m) | map(map(.c[]) | unique | length) | max // 0' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
+  echo "stats: agent_calls=${agent_calls:-0} max_agents_in_one_message=${agent_parallel:-0} $(jq -r '"num_turns=\(.num_turns) duration_ms=\(.duration_ms) cost_usd=\(.total_cost_usd)"' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
+  echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
+  [ "$rc" -eq 0 ] || fail "claude exited with status $rc (143 or 137 usually means the timeout)"
+  [ "$(jq -r '.is_error // false' "$JOB/claude.json" 2>/dev/null)" = false ] ||
+    fail "claude reported an error: $(jq -r '.result // "?"' "$JOB/claude.json" | head -c 200)"
 
-cost_check
+  cost_check
+fi
 
 # =============================== review: post the draft ===============================
 finish_review() {
@@ -400,4 +432,54 @@ finish_fix() {
   succeed "$out (verified on GitHub)."
 }
 
-if [ "$kind" = review ]; then finish_review; else finish_fix; fi
+# =============================== conflict: check, commit the merge, push ===============================
+finish_conflict() {
+  local r=$JOB/result.json f bad="" files=() nf=0 newsha summary="" left
+  if [ -z "$skip_model" ]; then
+    [ -s "$r" ] || fail "the model wrote no result.json"
+    jq -e '(.summary | type == "string") and ((.unresolved // []) | type == "array")' "$r" >/dev/null ||
+      fail "result.json is malformed"
+    if [ "$(jq '(.unresolved // []) | length' "$r")" -gt 0 ]; then
+      git -C "$WT" merge --abort >>"$LOG" 2>&1
+      succeed "I did not resolve the merge conflicts: $(jq -r '[.unresolved[] | "\(.file): \(.why)"] | join("; ")' "$r" | cut -c1-300). Please merge $base in by hand."
+    fi
+    summary=$(jq -r .summary "$r" | cut -c1-200)
+    # Only the conflicted files may change; anything else the model touched is put back.
+    git -C "$WT" diff --name-only | sort -u | while IFS= read -r f; do
+      grep -qxF "$f" "$JOB/conflicts.txt" ||
+        { git -C "$WT" checkout -- "$f" 2>>"$LOG"; echo "put back (not a conflicted file): $f" >>"$LOG"; }
+    done
+    while IFS= read -r f; do
+      files+=("$f"); nf=$((nf + 1))
+      grep -qE '^(<<<<<<<|>>>>>>>)( |$)' "$WT/$f" && bad="$bad $f"
+      case $f in *.json) jq empty "$WT/$f" >/dev/null 2>&1 || bad="$bad $f(invalid JSON)" ;; esac
+    done <"$JOB/conflicts.txt"
+    [ -z "$bad" ] || fail "conflict markers or broken files left after resolving:$bad"
+    git -C "$WT" add -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add of the resolved files failed"
+  fi
+  left=$(git -C "$WT" diff --name-only --diff-filter=U)
+  [ -z "$left" ] || fail "still unmerged after resolving: $left"
+  local what_done="merged $base into your branch"
+  [ "$nf" -gt 0 ] && what_done="$what_done and resolved conflicts in $nf file(s) (${files[*]})${summary:+: $summary}"
+  check_head
+  [ "$dry" = true ] && succeed "I would have $what_done and pushed (nothing was pushed)."
+  live_now
+  abort_if_paused
+  # Hooks off, as in the fix path: a hooksPath set by the repo (husky) would run the PR's code here.
+  git -C "$WT" -c core.hooksPath=/dev/null commit -q --no-edit -m "Merge $base into $branch" >>"$LOG" 2>&1 ||
+    fail "git commit of the merge failed"
+  newsha=$(git -C "$WT" rev-parse HEAD)
+  posted=1
+  git -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
+    { posted=0; fail "git push was rejected (not forced, remote probably moved)"; }
+  local i seen=""
+  for i in 1 2 3 4 5; do
+    seen=$(gh_get "repos/$repo/pulls/$n" --jq .head.sha); [ "$seen" = "$newsha" ] && break; sleep 2
+  done
+  [ "$seen" = "$newsha" ] || fail "pushed ${newsha:0:7} but GitHub shows head ${seen:0:7}"
+  succeed "I $what_done, pushed ${newsha:0:7} (verified on GitHub). CI runs the tests."
+}
+
+if [ "$kind" = review ]; then finish_review
+elif [ "$kind" = conflict ]; then finish_conflict
+else finish_fix; fi

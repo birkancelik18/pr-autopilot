@@ -53,6 +53,7 @@ live_since=$(cat "$STATE_DIR/live_since" 2>/dev/null || echo 1970-01-01T00:00:00
 flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson review_enabled "$(cfgd review_enabled true)"
   --argjson fix_enabled "$(cfgd fix_enabled true)"
+  --argjson conflict_enabled "$(cfgd conflict_enabled true)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")")
 
@@ -116,7 +117,14 @@ fetch() {
 }
 
 # Remember "evaluated, nothing to do" per (mode, PR, updated_at) so quiet PRs cost no API calls.
-settle() { printf '%s\t%s\n' "$seen_key" "$updated" >>"$SEEN"; }
+# Own PRs are looked at again after 10 minutes anyway: when the base branch moves, a new merge
+# conflict appears without the PR's updated_at changing.
+RECHECK_OWN=600
+settle() { printf '%s\t%s\t%s\n' "$seen_key" "$updated" "$(date +%s)" >>"$SEEN"; }
+settled() {
+  awk -F'\t' -v k="$seen_key" -v u="$updated" -v own="$1" -v now="$(date +%s)" -v age="$RECHECK_OWN" '
+    $1 == k && $2 == u && (own != "author" || now - ($3 + 0) < age) {found = 1} END {exit !found}' "$SEEN"
+}
 
 process_item() {
   local item=$1 repo n reason ev key file thread
@@ -127,7 +135,7 @@ process_item() {
   fi
   local seen_key="$mode|$repo#$n" updated
   updated=$(jq -r .updated_at <<<"$item")
-  if grep -qxF "$seen_key	$updated" "$SEEN"; then return 0; fi # nothing new since we last settled it
+  if settled "$reason"; then return 0; fi # nothing new since we last settled it
   fetch "repos/$repo/pulls/$n" "$tmp/pr" &&
     fetch "repos/$repo/pulls/$n/reviews" "$tmp/reviews" paginated &&
     fetch "repos/$repo/pulls/$n/comments" "$tmp/comments" paginated &&
@@ -143,6 +151,11 @@ process_item() {
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; settle; return 0
   fi
   key="$mode|$(jq -r .key <<<"$ev")"
+  # Feedback first: once the fix job for the newest feedback is done, a merge conflict is next.
+  if grep -qxF "$key" "$HANDLED" && [ "$(jq -r '.kind' <<<"$ev")" = fix ] && [ "$(jq -r '.conflict // false' <<<"$ev")" = true ]; then
+    ev=$(jq -c '. + {kind: "conflict", key: .conflict_key, who: "the base branch"}' <<<"$ev")
+    key="$mode|$(jq -r .key <<<"$ev")"
+  fi
   if grep -qxF "$key" "$HANDLED"; then log "already handled $key"; settle; return 0; fi
   if key_running "$key"; then log "already running $key"; return 0; fi
   local nfail last
