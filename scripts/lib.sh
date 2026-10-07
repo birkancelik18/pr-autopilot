@@ -15,7 +15,20 @@ is_paused() { [ -f "$STATE_DIR/paused" ]; }
 report() {
   local msg=$1 hook
   log "REPORT $msg"
-  if [ "$(uname)" = Darwin ]; then
+  # A message whose first line is a PR link gets a small window with an "Open PR" button: a
+  # notification cannot hold a clickable link without a helper app the user must install and allow.
+  # Started in the background (the job must not wait on a human); it closes itself after 60s.
+  local url body
+  url=$(head -1 <<<"$msg" | grep -oE '^https://[^ ]+$')
+  body=$(tail -n +2 <<<"$msg")
+  if [ "$(uname)" = Darwin ] && [ -n "$url" ]; then
+    local dialog=(osascript -e 'on run argv'
+      -e 'set r to display dialog (item 1 of argv) with title "pr-autopilot" buttons {"Close", "Open PR"} default button "Open PR" giving up after 60'
+      -e 'if button returned of r is "Open PR" then open location (item 2 of argv)'
+      -e 'end run' -- "$body" "$url")
+    if [ -n "${PR_AUTOPILOT_SYNC_REPORT:-}" ]; then "${dialog[@]}" >/dev/null 2>&1 || log "dialog failed"
+    else nohup "${dialog[@]}" >/dev/null 2>&1 </dev/null & fi
+  elif [ "$(uname)" = Darwin ]; then
     osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "pr-autopilot"' \
       -e 'end run' -- "$msg" >/dev/null 2>&1 || log "osascript failed"
   elif command -v notify-send >/dev/null; then

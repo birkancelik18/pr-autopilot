@@ -13,7 +13,7 @@ mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
 chmod +x "$W/bin/"* "$T/fake-job"
-export PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
+export PR_AUTOPILOT_SYNC_REPORT=1 PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
 S=$PR_AUTOPILOT_STATE
 cp -R "$T/fixtures" "$FIX"
 mkcfg() { # mkcfg <dry_run> [extra jq object]
@@ -162,7 +162,7 @@ check "job log records subagent calls, parallelism, turns, duration, cost" 1 "$(
 check "claude is asked for stream-json" 1 "$(grep -cxF stream-json "$S/claude.args")"
 check "diff and reviews are pre-fetched" 1 "$([ -s "$(cat "$S/claude.jobdir")/diff.patch" ] && [ -s "$(cat "$S/claude.jobdir")/reviews.json" ] && echo 1 || echo 0)"
 check "dry-run writes nothing to GitHub" 0 "$([ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0)"
-check "the PR link is the first line of the notification, the outcome the next" "1 1" "$(grep -c -- ' -- https://x/11$' "$S/notified") $(grep -A1 -- ' -- https://x/11$' "$S/notified" | grep -c '^\[DRY RUN\] PR #11')"
+check "a PR report is a window with Open PR that opens the PR link" 1 "$([ "$(uname)" = Darwin ] && grep -c 'buttons {"Close", "Open PR"}.*open location (item 2 of argv).* -- \[DRY RUN\] PR #11 (PR 11 title).* https://x/11$' "$S/notified" || echo 1)"
 check "dry-run reports what it would have done" 1 "$(grep -c '\[DRY RUN\] PR #11 (PR 11 title): alice asked you to review it. I would have posted APPROVE: No blockers found. (nothing was posted)' "$S/notified")"
 check "success is recorded as handled" 1 "$(grep -cxF "dry|review|acme/app|11|$SHA" "$S/handled.tsv")"
 check "worktree is cleaned up" 0 "$(git -C "$W/clone" worktree list | grep -c pr-autopilot)"
