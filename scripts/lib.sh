@@ -15,13 +15,20 @@ is_paused() { [ -f "$STATE_DIR/paused" ]; }
 report() {
   local msg=$1 hook
   log "REPORT $msg"
-  # A message whose first line is a PR link gets a small window with an "Open PR" button: a
-  # notification cannot hold a clickable link without a helper app the user must install and allow.
-  # Started in the background (the job must not wait on a human); it closes itself after 60s.
-  local url body
+  # A message whose first line is a PR link is shown per config notify_style:
+  # - "window" (default): a small window with an "Open PR" button; needs nothing. Started in the
+  #   background (the job must not wait on a human); it closes itself after 60s.
+  # - "notification": a banner whose click opens the PR. Needs terminal-notifier, installed and
+  #   allowed in System Settings; until then it falls back to a plain notification.
+  local url body style
   url=$(head -1 <<<"$msg" | grep -oE '^https://[^ ]+$')
   body=$(tail -n +2 <<<"$msg")
-  if [ "$(uname)" = Darwin ] && [ -n "$url" ]; then
+  style=$(cfg '.notify_style // "window"' 2>/dev/null || echo window)
+  if [ "$(uname)" = Darwin ] && [ -n "$url" ] && [ "$style" = notification ] &&
+    command -v terminal-notifier >/dev/null &&
+    terminal-notifier -title pr-autopilot -message "$body" -open "$url" >/dev/null 2>&1; then
+    :
+  elif [ "$(uname)" = Darwin ] && [ -n "$url" ] && [ "$style" != notification ]; then
     local dialog=(osascript -e 'on run argv'
       -e 'set r to display dialog (item 1 of argv) with title "pr-autopilot" buttons {"Close", "Open PR"} default button "Open PR" giving up after 60'
       -e 'if button returned of r is "Open PR" then open location (item 2 of argv)'

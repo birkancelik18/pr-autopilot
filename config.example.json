@@ -13,5 +13,6 @@
   "trusted_commenters": [],
   "auto_approve_outsiders": false,
   "max_cost_usd_per_job": 10,
-  "review_skills": []
+  "review_skills": [],
+  "notify_style": "window"
 }

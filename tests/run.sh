@@ -12,6 +12,7 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
+printf '#!/usr/bin/env bash\necho "TN $@" >>"$PR_AUTOPILOT_STATE/notified"; exit ${FAKE_TN_EXIT:-0}\n' >"$W/bin/terminal-notifier"
 chmod +x "$W/bin/"* "$T/fake-job"
 export PR_AUTOPILOT_SYNC_REPORT=1 PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
 S=$PR_AUTOPILOT_STATE
@@ -319,6 +320,13 @@ FAKE_CLAUDE=hang bash "$T/../scripts/job.sh" "$W/ev.json" & jp=$!
 for i in $(seq 1 50); do [ -s "$S/hang.pid" ] && break; sleep 0.1; done
 hp=$(cat "$S/hang.pid"); kill -TERM "$jp"; wait "$jp" 2>/dev/null; sleep 0.3
 check "pause/TERM kills claude's whole process group, including its children" "gone" "$(kill -0 "$hp" 2>/dev/null && echo alive || echo gone)"
+if [ "$(uname)" = Darwin ]; then
+  jq -n '{repos: {"acme/app": "/x"}, notify_style: "notification"}' >"$W/c6.json"
+  rep() { rm -f "$S/notified"; (PR_AUTOPILOT_CONFIG=$W/c6.json; . "$T/../scripts/lib.sh"; report "https://github.com/acme/app/pull/5
+PR #5: done."); }
+  rep; check "notify_style notification: a banner whose click opens the PR" 1 "$(grep -c '^TN -title pr-autopilot -message PR #5: done. -open https://github.com/acme/app/pull/5$' "$S/notified")"
+  FAKE_TN_EXIT=3 rep; check "terminal-notifier not allowed yet: a plain notification with the link still shows" "1 1" "$(grep -c 'display notification.* -- https://github.com/acme/app/pull/5$' "$S/notified") $(grep -cx 'PR #5: done.' "$S/notified")"
+fi
 check "slack text is escaped" "&lt;!channel&gt; a&amp;b" "$(printf '<!channel> a&b' | (. "$T/../scripts/lib.sh"; slack_escape))"
 check "mentions are defanged" 'hi `@bob` and `@org/team`' "$(printf 'hi @bob and @org/team' | (. "$T/../scripts/lib.sh"; defang) | tr -d '\n')"
 jq -n '{repos: ([range(0;30) | {key: "some-organisation/a-rather-long-repository-name-\(.)", value: "/x"}] | from_entries)}' >"$W/c5.json"
