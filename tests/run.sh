@@ -278,6 +278,12 @@ mkconflict src/a.txt; reset; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CL
 check "markers left: fails loudly, nothing pushed" "1 $PRH" "$(grep -c 'conflict markers or broken files left after resolving: src/a.txt' "$S/notified") $(git -C "$O" rev-parse feature-11)"
 reset; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict-unresolved job
 check "a real disagreement goes to the user: merge aborted, nothing pushed, handled" "1 $PRH 1" "$(grep -c 'I did not resolve the merge conflicts: src/a.txt: both sides change the rule differently. Please merge main in by hand' "$S/notified") $(git -C "$O" rev-parse feature-11) $(grep -c 'live|conflict' "$S/handled.tsv")"
+if command -v sandbox-exec >/dev/null; then
+  mkconflict src/a.txt; reset; jq '. + {run_local_tests_UNSAFE: {"acme/app": ["false"]}}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+  ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict job
+  check "opt-in local tests run before a conflict merge is pushed; a failure stops the push" "1 $PRH" "$(grep -c "local test command 'false' failed" "$S/notified") $(git -C "$O" rev-parse feature-11)"
+  cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
+fi
 mkconflict AGENTS.md; reset; rm -f "$S/claude.args"; ev conflict false "$PRH"; FAKE_HEAD_REPO=$O FAKE_CLAUDE=conflict job
 check "a conflict in agent config is never given to the model" "1 0 $PRH" "$(grep -c 'these need you: AGENTS.md (agent config)' "$S/notified") $([ -e "$S/claude.args" ] && echo 1 || echo 0) $(git -C "$O" rev-parse feature-11)"
 git -C "$O" checkout -q main && git -C "$O" reset -q --hard "$SHA"; git -C "$O" update-ref refs/heads/feature-11 "$SHA"; git -C "$O" update-ref refs/pull/11/head "$SHA"

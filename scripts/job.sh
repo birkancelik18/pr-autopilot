@@ -489,6 +489,10 @@ finish_conflict() {
   [ "$dry" = true ] && succeed "I would have $what_done and pushed (nothing was pushed)."
   live_now
   abort_if_paused
+  # Opt-in local tests (run_local_tests_UNSAFE), sandboxed, before the merge is pushed: a resolution
+  # that breaks a test fails here instead of on the PR. Without the opt-in, CI checks it and a red
+  # build becomes a CI-fix job.
+  run_local_tests
   # Hooks off, as in the fix path: a hooksPath set by the repo (husky) would run the PR's code here.
   git -C "$WT" -c core.hooksPath=/dev/null commit -q --no-edit -m "Merge $base into $branch" >>"$LOG" 2>&1 ||
     fail "git commit of the merge failed"
