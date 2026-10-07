@@ -15,5 +15,6 @@
   "max_cost_usd_per_job": 10,
   "review_skills": [],
   "notify_style": "window",
-  "conflict_enabled": true
+  "conflict_enabled": true,
+  "ci_fix_enabled": true
 }

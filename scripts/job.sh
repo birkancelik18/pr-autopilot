@@ -29,6 +29,7 @@ clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downc
 
 if [ "$kind" = review ]; then what="$who asked you to review it"
 elif [ "$kind" = conflict ]; then what="yours has merge conflicts with $base"
+elif [ "$kind" = cifix ]; then what="CI failed on yours"
 elif [ "$cr" = true ]; then what="$who requested changes on yours"
 else what="$who commented on yours"; fi
 # The PR link leads the notification: a click cannot open it, so it has to be readable.
@@ -182,6 +183,26 @@ if [ "$kind" = conflict ]; then
   fi
 fi
 
+# --- failing CI: hand the model the failing checks and the tail of each GitHub Actions job log
+# (untrusted data, like the rest of the PR). The model only edits files; CI verifies the fix.
+if [ "$kind" = cifix ]; then
+  mkdir -p "$JOB/ci"
+  gh_get "repos/$repo/commits/$head/check-runs?per_page=100" | jq '[.check_runs[]
+    | select((.conclusion // "") | IN("failure", "timed_out"))
+    | {id, name, conclusion, details_url, app: (.app.slug // ""), title: (.output.title // ""),
+       summary: ((.output.summary // "") | .[0:4000]), text: ((.output.text // "") | .[0:4000])}]' \
+    >"$JOB/ci/failed.json" || fail "could not fetch the failing checks"
+  [ "$(jq length "$JOB/ci/failed.json")" -gt 0 ] || skip_quietly "no failing check on this commit any more"
+  ci_i=0
+  while IFS=$'\t' read -r ci_id ci_name ci_app; do
+    ci_i=$((ci_i + 1))
+    [ "$ci_app" = github-actions ] || continue
+    gh api "repos/$repo/actions/jobs/$ci_id/logs" 2>>"$LOG" | tail -n 400 \
+      >"$JOB/ci/$ci_i-$(printf '%s' "$ci_name" | tr -c 'A-Za-z0-9._-' _ | cut -c1-60).log" ||
+      echo "could not fetch the log of $ci_name" >>"$LOG"
+  done < <(jq -r '.[] | [.id, .name, .app] | @tsv' "$JOB/ci/failed.json")
+fi
+
 # --- tools. Reads (Read/Grep/Glob) need no rule: dontAsk allows them only inside the working
 # directories, which are the worktree (cwd) and the job dir (--add-dir). Everything else is denied.
 deny=("Bash(gh *)" "Bash(git *)" "Bash(curl *)" "Bash(wget *)" "Bash(ssh *)" "Bash(scp *)"
@@ -193,6 +214,9 @@ if [ "$kind" = review ]; then
 elif [ "$kind" = conflict ]; then
   allow=("Edit(/$WT/**)" "Edit(/$JOB/result.json)")
   skill=resolve-conflicts
+elif [ "$kind" = cifix ]; then
+  allow=("Edit(/$WT/**)" "Edit(/$JOB/result.json)")
+  skill=fix-ci
 else
   # No Bash at all: the model only edits files. The script commits, pushes and (opt-in, sandboxed) tests.
   allow=("Edit(/$WT/**)" "Edit(/$JOB/result.json)")
@@ -480,6 +504,63 @@ finish_conflict() {
   succeed "I $what_done, pushed ${newsha:0:7} (verified on GitHub). CI runs the tests."
 }
 
+# =============================== cifix: push a fix, re-run once, or hand over ===============================
+finish_cifix() {
+  local r=$JOB/result.json action summary files=() f dirty msg newsha runs run
+  [ -s "$r" ] || fail "the model wrote no result.json"
+  jq -e '((.action // "") | IN("fix", "rerun", "none")) and (.summary | type == "string")
+    and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
+      and (contains("..") | not) and (startswith(".git") | not)))' "$r" >/dev/null ||
+    fail "result.json is malformed"
+  action=$(jq -r .action "$r")
+  summary=$(jq -r .summary "$r" | cut -c1-250)
+  check_head
+  if [ "$action" = none ]; then
+    succeed "I did not fix the failing CI: $summary. This one needs you."
+  fi
+  if [ "$action" = rerun ]; then
+    # Flaky or infrastructure failure: re-run the failed GitHub Actions jobs. Once per commit: the
+    # job key is the head sha, so a second red run on the same commit is left to the user.
+    runs=$(jq -r '.[] | (.details_url // "") | select(test("/actions/runs/[0-9]+"))
+      | capture("/actions/runs/(?<r>[0-9]+)").r' "$JOB/ci/failed.json" | sort -u)
+    [ -n "$runs" ] ||
+      succeed "I think the CI failure is not caused by the code ($summary), but there is no GitHub Actions run I can re-run. This one needs you."
+    [ "$dry" = true ] && succeed "I would have re-run the failed CI jobs: $summary (nothing was re-run)."
+    live_now
+    abort_if_paused
+    posted=1
+    for run in $runs; do
+      gh api -X POST "repos/$repo/actions/runs/$run/rerun-failed-jobs" >/dev/null 2>>"$LOG" ||
+        fail "re-running the failed jobs of run $run failed"
+    done
+    succeed "I re-ran the failed CI jobs once: $summary. If they fail again on this commit, it needs you."
+  fi
+  # action fix: commit only the files the model lists, never `git add -A`.
+  while IFS= read -r f; do files+=("$f"); done < <(jq -r '(.files // [])[]' "$r")
+  [ ${#files[@]} -gt 0 ] || fail "the model chose fix but listed no files"
+  dirty=$(git -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
+  [ "$dirty" -gt 0 ] || fail "the model chose fix but the listed files are unchanged"
+  [ "$dry" = true ] && succeed "I would have fixed the failing CI: $summary ($dirty files) and pushed (nothing was pushed)."
+  live_now
+  abort_if_paused
+  run_local_tests
+  msg=$(jq -r '.commit_message // "Fix failing CI"' "$r" | head -c 300 | defang)
+  [ -n "$msg" ] || msg="Fix failing CI"
+  git -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
+  git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
+  newsha=$(git -C "$WT" rev-parse HEAD)
+  posted=1
+  git -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
+    { posted=0; fail "git push was rejected (not forced, remote probably moved)"; }
+  local i seen=""
+  for i in 1 2 3 4 5; do
+    seen=$(gh_get "repos/$repo/pulls/$n" --jq .head.sha); [ "$seen" = "$newsha" ] && break; sleep 2
+  done
+  [ "$seen" = "$newsha" ] || fail "pushed ${newsha:0:7} but GitHub shows head ${seen:0:7}"
+  succeed "I fixed the failing CI: $summary, pushed ${newsha:0:7} (verified on GitHub). CI runs again."
+}
+
 if [ "$kind" = review ]; then finish_review
 elif [ "$kind" = conflict ]; then finish_conflict
+elif [ "$kind" = cifix ]; then finish_cifix
 else finish_fix; fi

@@ -30,6 +30,11 @@ J
     if [ "$FAKE_CLAUDE" = conflict-unresolved ]; then
       echo '{"summary":"x","unresolved":[{"file":"src/a.txt","why":"both sides change the rule differently"}]}' >"$jd/result.json"
     else echo '{"summary":"kept both lines","unresolved":[]}' >"$jd/result.json"; fi ;;
+  cifix-fix)
+    echo fixed >>src/a.txt
+    echo '{"action":"fix","summary":"the test expected the old label","commit_message":"Fix the label test","files":["src/a.txt"]}' >"$jd/result.json" ;;
+  cifix-rerun) echo '{"action":"rerun","summary":"the runner lost its network","files":[]}' >"$jd/result.json" ;;
+  cifix-none) echo '{"action":"none","summary":"a deploy secret is missing in CI","files":[]}' >"$jd/result.json" ;;
   fix-decline)
     echo fixed >>src/a.txt
     echo '{"summary":"x","files":["src/a.txt"],"replies":[{"in_reply_to":5001,"body":"Fixed one, declined the other: out of scope."}],"re_request":[]}' >"$jd/result.json" ;;

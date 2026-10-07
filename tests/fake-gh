@@ -50,6 +50,10 @@ case "$method $ep" in
   "POST repos/"*/pulls/*/requested_reviewers)
     echo "POST $ep ${reviewers[*]}" >>"$W"
     printf '%s\n' "${reviewers[@]}" | jq -R '{login: .}' | jq -s . >"$S/requested.json"; echo '{}' ;;
+  "GET repos/"*/commits/*/check-runs*)
+    if [ -n "${FAKE_CHECKS:-}" ]; then cat "$FAKE_CHECKS"; else echo '{"check_runs": []}'; fi | out ;;
+  "GET repos/"*/actions/jobs/*/logs) printf 'step 1\nFAIL src/a.test.ts > expects the old label\nExpected: "A" Received: "B"\n' ;;
+  "POST repos/"*/actions/runs/*/rerun-failed-jobs) echo "POST $ep" >>"$W"; echo '{}' ;;
   "GET repos/"*/pulls/*)
     n=$(num "$ep")
     sha=""; [ -n "${FAKE_HEAD_REPO:-}" ] && sha=$(git -C "$FAKE_HEAD_REPO" rev-parse refs/heads/feature-11)

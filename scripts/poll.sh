@@ -7,7 +7,7 @@ set -uo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/lib.sh"
 JOB=${PR_AUTOPILOT_JOB:-$DIR/job.sh}
-MAX_ATTEMPTS=3 RETRY_AFTER=300
+MAX_ATTEMPTS=3 RETRY_AFTER=300 MAX_CI_FIXES=3
 
 is_paused && { log "paused"; exit 0; }
 [ -f "$CONFIG" ] || { log "no config at $CONFIG, run /pr-autopilot:setup"; exit 0; }
@@ -54,6 +54,7 @@ flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson review_enabled "$(cfgd review_enabled true)"
   --argjson fix_enabled "$(cfgd fix_enabled true)"
   --argjson conflict_enabled "$(cfgd conflict_enabled true)"
+  --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")")
 
@@ -141,9 +142,15 @@ process_item() {
     fetch "repos/$repo/pulls/$n/comments" "$tmp/comments" paginated &&
     fetch "repos/$repo/issues/$n/comments" "$tmp/issue" paginated ||
     { log "ERROR $repo#$n: could not fetch PR data, will retry next poll"; return 1; }
+  # CI results only matter on the user's own PRs.
+  echo '{"check_runs": []}' >"$tmp/checks"
+  if [ "$(jq -r .user.login "$tmp/pr")" = "$me" ]; then
+    fetch "repos/$repo/commits/$(jq -r .head.sha "$tmp/pr")/check-runs?per_page=100" "$tmp/checks" ||
+      { log "ERROR $repo#$n: could not fetch check runs, will retry next poll"; return 1; }
+  fi
   ev=$(jq -n -c -f "$DIR/classify.jq" --arg me "$me" --arg reason "$reason" --arg repo "$repo" \
     --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
-    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue") ||
+    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
   [ "$(jq -r .untrusted <<<"$ev")" = 0 ] ||
     log "$repo#$n: ignoring $(jq -r .untrusted <<<"$ev") comment(s)/review(s) from untrusted authors (not owner/member/collaborator, not in trusted_commenters)"
@@ -151,10 +158,27 @@ process_item() {
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; settle; return 0
   fi
   key="$mode|$(jq -r .key <<<"$ev")"
-  # Feedback first: once the fix job for the newest feedback is done, a merge conflict is next.
-  if grep -qxF "$key" "$HANDLED" && [ "$(jq -r '.kind' <<<"$ev")" = fix ] && [ "$(jq -r '.conflict // false' <<<"$ev")" = true ]; then
-    ev=$(jq -c '. + {kind: "conflict", key: .conflict_key, who: "the base branch"}' <<<"$ev")
+  # Own PRs carry ordered steps (feedback, then conflict, then CI): run the first not handled yet.
+  local st next=""
+  while IFS= read -r st; do
+    [ -n "$st" ] || continue
+    grep -qxF "$mode|$(jq -r .key <<<"$st")" "$HANDLED" || { next=$st; break; }
+  done < <(jq -c '(.steps // [])[]' <<<"$ev")
+  if [ -n "$next" ]; then
+    ev=$(jq -c --argjson s "$next" '. + $s' <<<"$ev")
     key="$mode|$(jq -r .key <<<"$ev")"
+  fi
+  # At most MAX_CI_FIXES CI-fix jobs per PR: past that a red build needs the user, and saying so
+  # once beats pushing guesses forever.
+  if [ "$(jq -r .kind <<<"$ev")" = cifix ] &&
+    [ "$(grep -c "^$mode|cifix|$repo|$n|" "$HANDLED")" -ge "$MAX_CI_FIXES" ]; then
+    log "skip $repo#$n: CI still failing after $MAX_CI_FIXES fix attempts"
+    if ! grep -qxF "$mode|$repo#$n" "$STATE_DIR/ci-gave-up.tsv" 2>/dev/null; then
+      echo "$mode|$repo#$n" >>"$STATE_DIR/ci-gave-up.tsv"
+      report "$(jq -r .url <<<"$ev")
+PR #$n ($(jq -r .title <<<"$ev")): CI is still failing after $MAX_CI_FIXES fix attempts. I stopped; this one needs you."
+    fi
+    settle; return 0
   fi
   if grep -qxF "$key" "$HANDLED"; then log "already handled $key"; settle; return 0; fi
   if key_running "$key"; then log "already running $key"; return 0; fi

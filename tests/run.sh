@@ -113,6 +113,15 @@ jq '.mergeable_state = "dirty" | .base.sha = "bbb000"' "$FIX/pr-12.json" >"$W/x"
 fk=$(grep '"fix","acme/app",12' "$S/jobs.log" | tail -1 | jq -r '.[5]'); echo "dry|$fk" >>"$S/handled.tsv"; bump 12
 n3=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
 check "fix already handled + PR dirty: a conflict job starts for #12" '"conflict" 12' "$([ "$(jobs_n)" -gt "$n3" ] && tail -1 "$S/jobs.log" | jq -r '"\"\(.[0])\" \(.[2])"')"
+echo "== poller: then failing CI; at most 3 CI fixes per PR"
+jq -n '{check_runs: [{status: "completed", conclusion: "failure"}]}' >"$W/ck-red2.json"
+ck=$(tail -1 "$S/jobs.log" | jq -r '.[5]'); grep -qxF "dry|$ck" "$S/handled.tsv" || echo "dry|$ck" >>"$S/handled.tsv"; bump 12
+n4=$(jobs_n); FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll
+check "fix and conflict handled + CI red: a CI fix job starts for #12" '"cifix" 12' "$([ "$(jobs_n)" -gt "$n4" ] && tail -1 "$S/jobs.log" | jq -r '"\"\(.[0])\" \(.[2])"')"
+printf 'dry|cifix|acme/app|12|old1\ndry|cifix|acme/app|12|old2\n' >>"$S/handled.tsv"
+jq '.head.sha = "ccc999"' "$FIX/pr-12.json" >"$W/x" && mv "$W/x" "$FIX/pr-12.json"; bump 12; rm -f "$S/notified"
+n5=$(grep -c '"cifix","acme/app",12' "$S/jobs.log"); FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll; bump 12; FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll
+check "after 3 CI fixes: no 4th CI job for #12, the user is told once" "$n5 1" "$(grep -c '"cifix","acme/app",12' "$S/jobs.log") $(grep -c 'PR #12 .*CI is still failing after 3 fix attempts' "$S/notified")"
 echo "== scheduler files keep jobs alive after poll.sh exits"
 plist=$(bash "$T/../scripts/install-scheduler.sh" print-plist); unit=$(bash "$T/../scripts/install-scheduler.sh" print-unit)
 check "launchd plist has AbandonProcessGroup=true" 1 "$(grep -c '<key>AbandonProcessGroup</key><true/>' <<<"$plist")"
@@ -140,6 +149,7 @@ jq -n --arg c "$W/clone" '{repos: {"acme/app": $c}, dry_run: false}' >"$PR_AUTOP
 ev() { # ev <kind> <dry_run> [head]
   local key="review|acme/app|11|$SHA" who=alice cr=false
   [ "$1" = fix ] && { key="fix|acme/app|11|r901-v0-c5001-i0"; who=bob; cr=true; }
+  [ "$1" = cifix ] && { key="cifix|acme/app|11|${3:-$SHA}"; who=CI; }
   [ "$1" = conflict ] && { key="conflict|acme/app|11|${3:-$SHA}|base"; who="the base branch"; }
   jq -n --arg k "$1" --argjson d "$2" --arg a "${ASSOC:-MEMBER}" --arg h "${3:-$SHA}" --arg key "$key" --arg who "$who" --argjson cr "$cr" \
     '{kind:$k, key:$key, repo:"acme/app", number:11, head:$h, branch:"feature-11", base:"main",
@@ -272,6 +282,29 @@ mkconflict AGENTS.md; reset; rm -f "$S/claude.args"; ev conflict false "$PRH"; F
 check "a conflict in agent config is never given to the model" "1 0 $PRH" "$(grep -c 'these need you: AGENTS.md (agent config)' "$S/notified") $([ -e "$S/claude.args" ] && echo 1 || echo 0) $(git -C "$O" rev-parse feature-11)"
 git -C "$O" checkout -q main && git -C "$O" reset -q --hard "$SHA"; git -C "$O" update-ref refs/heads/feature-11 "$SHA"; git -C "$O" update-ref refs/pull/11/head "$SHA"
 
+echo "== failing CI on the user's own PR: fix, re-run once, or hand over"
+jq -n '{check_runs: [
+  {id: 777, name: "Frontend Tests", status: "completed", conclusion: "failure", app: {slug: "github-actions"},
+   details_url: "https://github.com/acme/app/actions/runs/555/job/777", output: {title: "1 test failed", summary: "", text: ""}},
+  {id: 778, name: "Lint", status: "completed", conclusion: "success", app: {slug: "github-actions"},
+   details_url: "https://github.com/acme/app/actions/runs/555/job/778", output: {}}]}' >"$W/checks-red.json"
+reset; ev cifix true; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job
+jd=$(cat "$S/claude.jobdir")
+check "the model gets the failing check (only) and its job log" "1 Frontend Tests 1" "$(jq -r 'length, .[0].name' "$jd/ci/failed.json" | paste -sd' ' -) $(grep -c 'FAIL src/a.test.ts' "$jd"/ci/1-Frontend_Tests.log)"
+check "CI fix job: edits only, no shell, no git" 0 "$(allow | grep -cE 'Bash|gh |git ')"
+check "dry-run: says what it would push, pushes nothing" "1 $SHA" "$(grep -c 'I would have fixed the failing CI: the test expected the old label (1 files) and pushed (nothing was pushed)' "$S/notified") $(git -C "$O" rev-parse feature-11)"
+reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job
+new=$(git -C "$O" rev-parse feature-11)
+check "live fix: one commit on the PR branch with the listed file only" "$SHA src/a.txt" "$(git -C "$O" rev-parse "$new^") $(git -C "$O" diff --name-only "$SHA" "$new")"
+check "and the report says pushed and verified" 1 "$(grep -c "I fixed the failing CI: the test expected the old label, pushed ${new:0:7} (verified on GitHub)" "$S/notified")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"
+reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-rerun job
+check "flaky: re-runs the failed jobs of that run once, pushes nothing" "1 $SHA 1" "$(grep -c 'POST repos/acme/app/actions/runs/555/rerun-failed-jobs' "$S/writes.log") $(git -C "$O" rev-parse feature-11) $(grep -c 'I re-ran the failed CI jobs once' "$S/notified")"
+reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-none job
+check "not fixable here: hands over, writes nothing" "1 0" "$(grep -c 'I did not fix the failing CI: a deploy secret is missing in CI. This one needs you' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+reset; ev cifix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job
+check "CI is green by the time the job runs: quiet skip, nothing pushed" "0 $SHA" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $(git -C "$O" rev-parse feature-11)"
+
 echo "== safety: fix job has no shell, commits only listed files"
 reset_fix() { git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; rm -f "$S/logs/"*; }
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
@@ -304,9 +337,10 @@ echo "== safety: only trusted feedback starts a fix, stale notifications do not 
 cls() { # cls <pr> <reviews> <comments> <issue> <reason> <via_search>
   jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason "$5" --arg repo acme/app --argjson ignore '[]' \
     --argjson trusted "${TRUSTED:-[]}" --argjson via_search "$6" --argjson allow_forks false --argjson review_enabled true \
-    --argjson fix_enabled true --argjson conflict_enabled "${CONFLICT:-true}" --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4"
+    --argjson fix_enabled true --argjson conflict_enabled "${CONFLICT:-true}" --argjson ci_enabled "${CI_ON:-true}" --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4" --slurpfile checks "${CHECKS:-$W/nochecks.json}"
 }
 echo '[]' >"$W/empty.json"
+echo '{"check_runs": []}' >"$W/nochecks.json"
 for assoc in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR; do
   echo "[{\"id\":9,\"user\":{\"login\":\"rando\"},\"author_association\":\"$assoc\",\"body\":\"please add x\"}]" >"$W/c.json"
   check "feedback from a $assoc author is ignored (and counted)" "nothing to address 1" "$(cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '"\(.skip) \(.untrusted)"')"
@@ -321,6 +355,13 @@ check "own PR with a merge conflict and no feedback: a conflict job keyed on hea
 check "conflict_enabled false: no conflict job" "nothing to address" "$(CONFLICT=false cls "$W/pr-dirty.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r .skip)"
 echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
 check "conflict plus feedback: the fix runs first, the conflict is carried along" "fix true" "$(cls "$W/pr-dirty.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '"\(.kind) \(.conflict)"')"
+jq -n '{check_runs: [{status: "completed", conclusion: "failure"}, {status: "completed", conclusion: "success"}]}' >"$W/ck-red.json"
+jq -n '{check_runs: [{status: "completed", conclusion: "failure"}, {status: "in_progress", conclusion: null}]}' >"$W/ck-running.json"
+check "own PR with failed CI and nothing else: a CI fix keyed on the head" "cifix cifix|acme/app|18|hhh888" "$(CHECKS=$W/ck-red.json cls "$FIX/pr-18.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r '"\(.kind) \(.key)"')"
+check "CI still running: wait, nothing to do yet" "nothing to address" "$(CHECKS=$W/ck-running.json cls "$FIX/pr-18.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r .skip)"
+check "ci_fix_enabled false: no CI fix" "nothing to address" "$(CI_ON=false CHECKS=$W/ck-red.json cls "$FIX/pr-18.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r .skip)"
+echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
+check "feedback, conflict and red CI: steps in that order" "fix conflict cifix" "$(CHECKS=$W/ck-red.json cls "$W/pr-dirty.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '[.steps[].kind] | join(" ")')"
 echo '[{"id":9,"user":{"login":"rando"},"author_association":"NONE","body":"x"}]' >"$W/c.json"
 check "trusted_commenters can vouch for an outsider" fix "$(TRUSTED='["rando"]' cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r .kind)"
 jq '.requested_reviewers = []' "$FIX/pr-11.json" >"$W/pr-stale.json"
