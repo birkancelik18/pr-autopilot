@@ -193,14 +193,23 @@ if [ "$kind" = cifix ]; then
        summary: ((.output.summary // "") | .[0:4000]), text: ((.output.text // "") | .[0:4000])}]' \
     >"$JOB/ci/failed.json" || fail "could not fetch the failing checks"
   [ "$(jq length "$JOB/ci/failed.json")" -gt 0 ] || skip_quietly "no failing check on this commit any more"
+  # Each fetched log's exact path goes into failed.json as "log": the model cannot list ci/, so it
+  # must not have to guess file names.
   ci_i=0
+  : >"$JOB/ci/logs.tsv"
   while IFS=$'\t' read -r ci_id ci_name ci_app; do
     ci_i=$((ci_i + 1))
     [ "$ci_app" = github-actions ] || continue
-    gh api "repos/$repo/actions/jobs/$ci_id/logs" 2>>"$LOG" | tail -n 400 \
-      >"$JOB/ci/$ci_i-$(printf '%s' "$ci_name" | tr -c 'A-Za-z0-9._-' _ | cut -c1-60).log" ||
+    ci_log="$JOB/ci/$ci_i-$(printf '%s' "$ci_name" | tr -c 'A-Za-z0-9._-' _ | cut -c1-60).log"
+    if gh api "repos/$repo/actions/jobs/$ci_id/logs" 2>>"$LOG" | tail -n 400 >"$ci_log" && [ -s "$ci_log" ]; then
+      printf '%s\t%s\n' "$ci_id" "$ci_log" >>"$JOB/ci/logs.tsv"
+    else
       echo "could not fetch the log of $ci_name" >>"$LOG"
+    fi
   done < <(jq -r '.[] | [.id, .name, .app] | @tsv' "$JOB/ci/failed.json")
+  jq --rawfile t "$JOB/ci/logs.tsv" '($t | split("\n") | map(select(. != "") | split("\t") | {(.[0]): .[1]}) | add // {}) as $m
+    | map(. + {log: ($m[(.id | tostring)] // null)})' "$JOB/ci/failed.json" >"$JOB/ci/failed.json.tmp" &&
+    mv "$JOB/ci/failed.json.tmp" "$JOB/ci/failed.json" || fail "could not record the CI log paths"
 fi
 
 # --- tools. Reads (Read/Grep/Glob) need no rule: dontAsk allows them only inside the working

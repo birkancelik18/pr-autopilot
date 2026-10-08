@@ -297,6 +297,7 @@ jq -n '{check_runs: [
 reset; ev cifix true; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job
 jd=$(cat "$S/claude.jobdir")
 check "the model gets the failing check (only) and its job log" "1 Frontend Tests 1" "$(jq -r 'length, .[0].name' "$jd/ci/failed.json" | paste -sd' ' -) $(grep -c 'FAIL src/a.test.ts' "$jd"/ci/1-Frontend_Tests.log)"
+check "failed.json names the exact log path, so the model never guesses file names" 1 "$(grep -c 'FAIL src/a.test.ts' "$(jq -r '.[0].log' "$jd/ci/failed.json")")"
 check "CI fix job: edits only, no shell, no git" 0 "$(allow | grep -cE 'Bash|gh |git ')"
 check "dry-run: says what it would push, pushes nothing" "1 $SHA" "$(grep -c 'I would have fixed the failing CI: the test expected the old label (1 files) and pushed (nothing was pushed)' "$S/notified") $(git -C "$O" rev-parse feature-11)"
 reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job

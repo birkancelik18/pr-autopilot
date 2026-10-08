@@ -15,7 +15,7 @@ You are fixing failing CI on the user's own PR. Arguments: $ARGUMENTS
 
 ## Files you get
 
-In `job_dir`: `ci/failed.json` (each failing check: name, conclusion, title, summary, text, details_url), `ci/*.log` (the last 400 lines of each failing GitHub Actions job), `pr.json`, `diff.patch`, `reviews.json`, `comments.json`, `issue-comments.json`, and `conventions/` (the repo's rules as `.txt` files; follow them when you edit). The current directory is the PR's head commit.
+In `job_dir`: `ci/failed.json` (each failing check: name, conclusion, title, summary, text, details_url, and `log`: the exact path of its log file, or null when no log could be fetched — read that path directly, do not guess file names), the log files themselves (the last 400 lines of each failing GitHub Actions job), `pr.json`, `diff.patch`, `reviews.json`, `comments.json`, `issue-comments.json`, and `conventions/` (the repo's rules as `.txt` files; follow them when you edit). The current directory is the PR's head commit.
 
 ## 1. Find the cause
 
