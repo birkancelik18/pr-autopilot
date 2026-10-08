@@ -51,10 +51,17 @@ J
     echo '{"summary":"x","files":[],"deferrals":[{"pr":13,"body":"Add the constraint."}],"replies":[{"in_reply_to":5001,"body":"Belongs in #13: {{deferral:0}}."}],"re_request":[]}' >"$jd/result.json" ;;
   fix-defer-issue)
     echo '{"summary":"x","files":[],"deferrals":[{"issue_title":"Enforce uniqueness","body":"From review."}],"replies":[{"in_reply_to":5001,"body":"Out of this PR, tracked in {{deferral:0}}."}],"re_request":[],"escalate":"Docs only; a 10-line constraint would close it."}' >"$jd/result.json" ;;
+  fix-curly) # a typographic apostrophe must not hide a promise
+    echo '{"summary":"x","files":[],"replies":[{"in_reply_to":5001,"body":"Good catch, I’ll correct the PR description."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-two-deferrals)
+    echo '{"summary":"x","files":[],"deferrals":[{"pr":12,"body":"First."},{"issue_title":"Second","body":"Second."}],"replies":[{"in_reply_to":5001,"body":"Recorded in {{deferral:0}} and {{deferral:1}}."}],"re_request":[],"escalate":"Two deferred points."}' >"$jd/result.json" ;;
+  fix-many-deferrals)
+    echo '{"summary":"x","files":[],"deferrals":[{"issue_title":"a","body":"a"},{"issue_title":"b","body":"b"},{"issue_title":"c","body":"c"},{"issue_title":"d","body":"d"}],"replies":[{"in_reply_to":5001,"body":"{{deferral:0}} {{deferral:1}} {{deferral:2}} {{deferral:3}}"}],"re_request":[]}' >"$jd/result.json" ;;
   fix-docsonly) # docs-only answer to a changes request, no escalation written by the model
     mkdir -p docs; echo limit >docs/limits.md
     echo '{"summary":"the documented limit","files":["docs/limits.md"],"replies":[{"in_reply_to":5001,"body":"Documented the limit in {{sha}}."}],"re_request":[]}' >"$jd/result.json" ;;
   fix-1554-done) # the same review answered properly: description fixed, deferral recorded, owner told
+    [ -n "${FAKE_BODY_RACE:-}" ] && { mkdir -p "$S/fake"; printf 'edited by the owner meanwhile' >"$S/fake/body-11"; }
     mkdir -p docs; echo limit >docs/limits.md
     cat >"$jd/result.json" <<'J'
 {"summary": "the documented limit", "files": ["docs/limits.md"], "pr_body": "Adds the limit. It does not enforce uniqueness yet.",

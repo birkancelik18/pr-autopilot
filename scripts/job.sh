@@ -54,8 +54,10 @@ trap cleanup EXIT
 trap 'echo "stopped (pause or signal)" >>"$LOG"; log "job $repo#$n stopped, will rerun after resume"; exit 143' TERM INT
 abort_if_paused() { is_paused && { echo "paused, aborting before any write" >>"$LOG"; log "job $repo#$n aborted by pause"; exit 143; }; }
 
+fail_extra="" # what the owner must still see when a job fails late (escalation, records already made)
 fail() { # fail <message>: loud report; retried by the poller (max 3) unless we already wrote to GitHub
   local nf
+  set -- "$1${fail_extra:+.$fail_extra}"
   echo "FAILED: $1" >>"$LOG"
   if [ "$posted" = 1 ]; then
     echo "$DKEY" >>"$STATE_DIR/handled.tsv" # a repeat could double-post
@@ -371,6 +373,13 @@ run_local_tests() {
 }
 
 # =============================== fix: commit, push, reply, re-request ===============================
+# GitHub may store CRLF or trim trailing space; compare descriptions after normalising both.
+NORM_BODY='(.body // "") | gsub("\r\n"; "\n") | sub("\\s+$"; "")'
+body_unchanged() { # the description must be what the job read at start, or a new one would clobber an edit
+  local now; now=$(gh_get "repos/$repo/pulls/$n" --jq "$NORM_BODY") || fail "cannot re-read the PR description"
+  [ "$now" = "$(jq -r "$NORM_BODY" "$JOB/pr.json")" ] ||
+    fail "the PR description changed while the job ran, so I did not overwrite it and posted no reply. NEEDS YOU: check the description against the review"
+}
 finish_fix() {
   local r=$JOB/result.json
   [ -s "$r" ] || fail "the model wrote no result.json"
@@ -419,8 +428,8 @@ finish_fix() {
   local gate
   gate=$(jq -r --argjson dirty "$dirty" --argjson cur "$n" '
     (.deferrals // []) as $d | (.promises // []) as $p | (.pr_body // "") as $b | .replies as $rs
-    | (.replies | to_entries[] | .key as $i | .value.body as $t
-        | (if ($t | test("\\b(I|we)(\u0027| wi)ll\\b|\\bwill (now |also )?(update|correct|fix|follow|add|change|open|file|address|handle|track|amend|edit|remove|rename|move|clarify|document)"; "i"))
+    | (.replies | to_entries[] | .key as $i | (.value.body | gsub("[\u2018\u2019\u02bc]"; "\u0027")) as $t
+        | (if ($t | test("\\b(I|we)(\u0027| wi)ll\\b|\\b(I\u0027m|I am|we\u0027re|we are) going to\\b|\\bwill (now |also |then |soon )?(update|correct|fix|follow|add|change|open|file|address|handle|track|amend|edit|remove|rename|move|clarify|document|look|do|make|revisit|check)|\\bfollow(ing)? up\\b"; "i"))
               and ($p | any(.reply == $i) | not)
            then "reply \($i + 1) promises an action but no promise in result.json backs it" else empty end),
           (if ($t | contains("{{sha}}")) and $dirty == 0 then "reply \($i + 1) cites {{sha}} but nothing is committed" else empty end),
@@ -441,6 +450,8 @@ finish_fix() {
           (if ($rs | any(.body | contains("{{deferral:\($k)}}"))) then empty else "deferral \($k) is linked from no reply" end))' "$r") ||
     fail "could not check the replies in result.json"
   [ -z "$gate" ] || fail "posting blocked, the replies do not match what the job does: $(tr '\n' ';' <<<"$gate" | sed 's/;$//')"
+  [ "$(jq '(.deferrals // []) | length' "$r")" -le 3 ] ||
+    fail "refusing $(jq '.deferrals | length' "$r") deferrals (max 3), nothing written. NEEDS YOU: decide which of these points to fix here and which to track elsewhere"
   # A deferral into another PR goes only to the user's own open PR; anything else needs an issue.
   local dp
   for dp in $(jq -r '(.deferrals // [])[] | .pr // empty' "$r"); do
@@ -460,6 +471,7 @@ finish_fix() {
     escalate="A reviewer requested changes and I changed no code (docs or replies only). If the point is about correctness, security or data integrity, decide whether the code fix should be made."
   fi
   [ -z "$escalate" ] || esc_note=" NEEDS YOU: $escalate"
+  fail_extra=$esc_note
   local new_body ndefer
   new_body=$(jq -r '.pr_body // ""' "$r" | defang)
   ndefer=$(jq '(.deferrals // []) | length' "$r")
@@ -474,6 +486,7 @@ finish_fix() {
     | map(select(. != $me and (endswith("[bot]") | not)))
     | map(select(. as $l | $rv[0] | any(.user.login == $l))) | unique | .[]' "$r")
   check_head
+  [ -z "$new_body" ] || body_unchanged
   if [ "$dry" = true ]; then
     local lg; lg=$(for l in $want; do printf '@%s ' "$l"; done | sed 's/ $//; s/ /, /g')
     succeed "I would have $([ "$dirty" -gt 0 ] && echo "fixed: $summary ($dirty files), pushed, ")$([ -n "$new_body" ] && echo "updated the PR description, ")$([ "$ndefer" -gt 0 ] && echo "recorded $ndefer deferral(s), ")replied on $nreplies thread(s)$([ -n "$lg" ] && echo ", re-requested review from $lg") (nothing was pushed or posted).$esc_note"
@@ -500,14 +513,15 @@ finish_fix() {
 
   # The PR description (the user's own PR), read back to verify, before any reply says it changed.
   if [ -n "$new_body" ]; then
+    body_unchanged
     posted=1
     gh api -X PATCH "repos/$repo/pulls/$n" -f body="$new_body" >/dev/null 2>>"$LOG" ||
       fail "editing the PR description failed"
-    [ "$(gh_get "repos/$repo/pulls/$n" --jq .body)" = "$new_body" ] ||
+    [ "$(gh_get "repos/$repo/pulls/$n" --jq "$NORM_BODY")" = "$(jq -rn --arg b "$new_body" "{body: \$b} | $NORM_BODY")" ] ||
       fail "edited the PR description but GitHub does not show the new text"
   fi
   # Deferrals: recorded where they will be seen, each linking back here, before any reply links them.
-  local links='[]' di dbody dpr link
+  local links='[]' di dbody dpr link esc_saved=$fail_extra
   for di in $(seq 0 $((ndefer - 1))); do
     dbody="$(jq -r ".deferrals[$di].body" "$r" | defang)
 
@@ -522,6 +536,7 @@ Deferred from the review of #$n: $url"
     fi
     [ -n "$link" ] || fail "recording deferral $di failed, no reply was posted"
     links=$(jq -c --arg l "$link" '. + [$l]' <<<"$links")
+    fail_extra=" Already recorded, clean up if needed: $(jq -r 'join(", ")' <<<"$links").$esc_saved"
   done
 
   local short=${newsha:0:7} errs="" nposted=0 idx id body resp

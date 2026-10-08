@@ -23,6 +23,7 @@ while [ $i -lt ${#args[@]} ]; do
   esac
   i=$((i + 1))
 done
+if [ -n "${FAKE_GH_FAIL:-}" ] && [ "$method $ep" = "$FAKE_GH_FAIL" ]; then echo "fake gh: forced failure" >&2; exit 1; fi
 out() { if [ -n "$expr" ]; then jq -r "$expr"; else cat; fi; }
 num() { sed -E 's#^repos/[^/]+/[^/]+/(pulls|issues)/([0-9]+).*#\2#' <<<"$1"; }
 
@@ -51,7 +52,7 @@ case "$method $ep" in
   "POST repos/"*/issues)
     echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 890, "number": 99, "html_url": "https://github.com/acme/app/issues/99"}' | out ;;
   "PATCH repos/"*/pulls/*)
-    echo "PATCH $ep ${fields[*]}" >>"$W"; printf '%s' "${fields[0]#body=}" >"$S/body-$(num "$ep")"; echo '{}' ;;
+    echo "PATCH $ep ${fields[*]}" >>"$W"; if [ -n "${FAKE_BODY_CRLF:-}" ]; then printf '%s \r\n' "${fields[0]#body=}"; else printf '%s' "${fields[0]#body=}"; fi >"$S/body-$(num "$ep")"; echo '{}' ;;
   "POST repos/"*/pulls/*/requested_reviewers)
     echo "POST $ep ${reviewers[*]}" >>"$W"
     printf '%s\n' "${reviewers[@]}" | jq -R '{login: .}' | jq -s . >"$S/requested.json"; echo '{}' ;;

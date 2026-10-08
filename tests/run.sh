@@ -268,6 +268,20 @@ reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-foreign job
 check "a deferral comment goes only to the user's own open PR" "1 0" "$(grep -c 'deferral target #13 is not an open PR of yours' "$S/notified") $(nw)"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-docsonly job
 check "docs-only answer to a changes request: the owner is told even if the model did not escalate" 1 "$(grep -c 'verified on GitHub). NEEDS YOU: A reviewer requested changes and I changed no code' "$S/notified")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-curly job
+check "a promise written with a curly apostrophe (I’ll) is caught too" "1 0" "$(grep -c 'posting blocked.*reply 1 promises an action' "$S/notified") $(nw)"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-many-deferrals job
+check "more than 3 deferrals: refused, owner asked, nothing written" "1 0" "$(grep -c 'refusing 4 deferrals (max 3), nothing written. NEEDS YOU' "$S/notified") $(nw)"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_BODY_RACE=1 FAKE_CLAUDE=fix-1554-done job
+check "description edited during the job: not overwritten, nothing pushed or posted, owner told" "1 0 $SHA" "$(grep -c 'PR description changed while the job ran.*NEEDS YOU' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_BODY_CRLF=1 FAKE_CLAUDE=fix-1554-done job
+check "description read back with CRLF and trailing space still verifies" 1 "$(grep -c 'updated the PR description.*(verified on GitHub)' "$S/notified")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
+FAKE_HEAD_REPO=$O FAKE_GH_FAIL="POST repos/acme/app/pulls/11/comments/5001/replies" FAKE_CLAUDE=fix-1554-done job
+check "a failure after the gate still tells the owner NEEDS YOU" 1 "$(grep -c 'PARTLY DONE, then FAILED: after the push: reply 1 failed;.*NEEDS YOU: My call: docs now' "$S/notified")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
+FAKE_HEAD_REPO=$O FAKE_GH_FAIL="POST repos/acme/app/issues" FAKE_CLAUDE=fix-two-deferrals job
+check "a failed second deferral lists the one already recorded, no reply posted" "1 0" "$(grep -c 'FAILED: recording deferral 1 failed, no reply was posted. Already recorded, clean up if needed: https://github.com/repos/acme/app/issues/12/comments#c889. NEEDS YOU: Two deferred points' "$S/notified") $(nwrites replies)"
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-issue job
 check "a deferral without an own target PR becomes an issue that the reply links" "1 1" "$(grep -c '^POST repos/acme/app/issues title=Enforce uniqueness body=From review.' "$S/writes.log") $(grep -c 'replies body=Out of this PR, tracked in https://github.com/acme/app/issues/99\.' "$S/writes.log")"
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-1554-done job
