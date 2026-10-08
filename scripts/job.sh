@@ -401,6 +401,68 @@ finish_fix() {
   done
   summary=$(jq -r '.summary' "$r" | cut -c1-200)
   nreplies=$(jq '.replies | length' "$r")
+
+  # Posting gate, before any write: a reply must not promise what this job does not do. Each
+  # promise ("I will ...") is listed in .promises and backed by the commit, the PR description edit
+  # or a deferral this job records; a deferral ("belongs in a later PR") links that record; {{sha}}
+  # needs a commit. The skill asks the model to check this itself; this is the mechanical backstop.
+  jq -e '((.pr_body // "") | type == "string" and length < 60000)
+    and ((.escalate // "") | type == "string" and length < 2000)
+    and ((.deferrals // []) | type == "array" and all(
+      (.body | type == "string" and length > 0 and length < 3000)
+      and ((.pr | type == "number" and . > 0 and . == floor) and .issue_title == null
+        or .pr == null and (.issue_title | type == "string" and length > 0 and length < 200))))
+    and ((.promises // []) | type == "array" and all(
+      (.reply | type == "number") and (.text | type == "string")
+      and ((.done_by // "") | test("^(commit|pr_body|deferral:[0-9]+)$"))))' "$r" >/dev/null ||
+    fail "result.json has a malformed pr_body, escalate, deferrals or promises field"
+  local gate
+  gate=$(jq -r --argjson dirty "$dirty" --argjson cur "$n" '
+    (.deferrals // []) as $d | (.promises // []) as $p | (.pr_body // "") as $b | .replies as $rs
+    | (.replies | to_entries[] | .key as $i | .value.body as $t
+        | (if ($t | test("\\b(I|we)(\u0027| wi)ll\\b|\\bwill (now |also )?(update|correct|fix|follow|add|change|open|file|address|handle|track|amend|edit|remove|rename|move|clarify|document)"; "i"))
+              and ($p | any(.reply == $i) | not)
+           then "reply \($i + 1) promises an action but no promise in result.json backs it" else empty end),
+          (if ($t | contains("{{sha}}")) and $dirty == 0 then "reply \($i + 1) cites {{sha}} but nothing is committed" else empty end),
+          (if ($t | test("(updated|corrected|fixed|edited|amended) the (PR )?description"; "i")) and $b == ""
+           then "reply \($i + 1) says the PR description was changed but pr_body is empty" else empty end),
+          (if ($t | test("belongs (in|to) |(separate|follow-?up|later|future|another|next|subsequent) PR|in a follow-?up|(later|follow-?up) (work|change|issue)|will be (handled|addressed|done|fixed) (in|by|later)"; "i"))
+              and ($t | test("\\{\\{deferral:[0-9]+\\}\\}") | not)
+           then "reply \($i + 1) defers the point but links no recorded deferral" else empty end),
+          ($t | [scan("\\{\\{deferral:([0-9]+)\\}\\}")[0] | tonumber] | .[] | select(. >= ($d | length))
+           | "reply \($i + 1) links deferral \(.) which does not exist")),
+      ($p[] | if .reply < 0 or .reply >= ($rs | length) then "promise \"\(.text)\" points at no reply"
+        elif .done_by == "commit" and $dirty == 0 then "promise \"\(.text)\" needs a commit but nothing is committed"
+        elif .done_by == "pr_body" and $b == "" then "promise \"\(.text)\" needs the PR description edit but pr_body is empty"
+        elif (.done_by | startswith("deferral:")) and ((.done_by[9:] | tonumber) >= ($d | length))
+        then "promise \"\(.text)\" needs a deferral that does not exist" else empty end),
+      ($d | to_entries[] | .key as $k
+        | (if .value.pr == $cur then "deferral \($k) points at this PR itself" else empty end),
+          (if ($rs | any(.body | contains("{{deferral:\($k)}}"))) then empty else "deferral \($k) is linked from no reply" end))' "$r") ||
+    fail "could not check the replies in result.json"
+  [ -z "$gate" ] || fail "posting blocked, the replies do not match what the job does: $(tr '\n' ';' <<<"$gate" | sed 's/;$//')"
+  # A deferral into another PR goes only to the user's own open PR; anything else needs an issue.
+  local dp
+  for dp in $(jq -r '(.deferrals // [])[] | .pr // empty' "$r"); do
+    [ "$(gh_get "repos/$repo/pulls/$dp" --jq '[.user.login, .state] | join(" ")')" = "$me open" ] ||
+      fail "deferral target #$dp is not an open PR of yours; defer to a GitHub issue instead"
+  done
+  # Escalation to the owner: the model's own note, or, when a reviewer's latest review requests
+  # changes and no code changed (docs or replies only), a generic one, so the owner decides instead
+  # of the loop closing silently.
+  local escalate codechanged=0 esc_note=""
+  escalate=$(jq -r '.escalate // "" | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:1500]' "$r")
+  [ ${#files[@]} -eq 0 ] || codechanged=$(git -C "$WT" status --porcelain -- "${files[@]}" | cut -c4- |
+    grep -cvE '(^|/)docs?/|\.(md|mdx|rst|txt|adoc)$')
+  if [ -z "$escalate" ] && [ "$codechanged" -eq 0 ] && jq -e --arg me "$me" '
+    map(select(.state != "PENDING" and .user.login != $me)) | group_by(.user.login) | map(max_by(.id))
+    | any(.state == "CHANGES_REQUESTED")' "$JOB/reviews.json" >/dev/null; then
+    escalate="A reviewer requested changes and I changed no code (docs or replies only). If the point is about correctness, security or data integrity, decide whether the code fix should be made."
+  fi
+  [ -z "$escalate" ] || esc_note=" NEEDS YOU: $escalate"
+  local new_body ndefer
+  new_body=$(jq -r '.pr_body // ""' "$r" | defang)
+  ndefer=$(jq '(.deferrals // []) | length' "$r")
   # Re-request: whoever the model lists, plus every human whose latest review requests changes,
   # once this job fixed or answered something (a declined point still deserves their look).
   local want acted=false
@@ -414,7 +476,7 @@ finish_fix() {
   check_head
   if [ "$dry" = true ]; then
     local lg; lg=$(for l in $want; do printf '@%s ' "$l"; done | sed 's/ $//; s/ /, /g')
-    succeed "I would have $([ "$dirty" -gt 0 ] && echo "fixed: $summary ($dirty files), pushed, ")replied on $nreplies thread(s)$([ -n "$lg" ] && echo ", re-requested review from $lg") (nothing was pushed or posted)."
+    succeed "I would have $([ "$dirty" -gt 0 ] && echo "fixed: $summary ($dirty files), pushed, ")$([ -n "$new_body" ] && echo "updated the PR description, ")$([ "$ndefer" -gt 0 ] && echo "recorded $ndefer deferral(s), ")replied on $nreplies thread(s)$([ -n "$lg" ] && echo ", re-requested review from $lg") (nothing was pushed or posted).$esc_note"
   fi
   live_now
   abort_if_paused
@@ -436,10 +498,37 @@ finish_fix() {
     [ "$seen" = "$newsha" ] || fail "pushed ${newsha:0:7} but GitHub shows head ${seen:0:7}"
   fi
 
+  # The PR description (the user's own PR), read back to verify, before any reply says it changed.
+  if [ -n "$new_body" ]; then
+    posted=1
+    gh api -X PATCH "repos/$repo/pulls/$n" -f body="$new_body" >/dev/null 2>>"$LOG" ||
+      fail "editing the PR description failed"
+    [ "$(gh_get "repos/$repo/pulls/$n" --jq .body)" = "$new_body" ] ||
+      fail "edited the PR description but GitHub does not show the new text"
+  fi
+  # Deferrals: recorded where they will be seen, each linking back here, before any reply links them.
+  local links='[]' di dbody dpr link
+  for di in $(seq 0 $((ndefer - 1))); do
+    dbody="$(jq -r ".deferrals[$di].body" "$r" | defang)
+
+Deferred from the review of #$n: $url"
+    dpr=$(jq -r ".deferrals[$di].pr // empty" "$r")
+    posted=1
+    if [ -n "$dpr" ]; then
+      link=$(gh api "repos/$repo/issues/$dpr/comments" -f body="$dbody" --jq '.html_url // empty' 2>>"$LOG")
+    else
+      link=$(gh api "repos/$repo/issues" -f title="$(jq -r ".deferrals[$di].issue_title" "$r" | defang)" \
+        -f body="$dbody" --jq '.html_url // empty' 2>>"$LOG")
+    fi
+    [ -n "$link" ] || fail "recording deferral $di failed, no reply was posted"
+    links=$(jq -c --arg l "$link" '. + [$l]' <<<"$links")
+  done
+
   local short=${newsha:0:7} errs="" nposted=0 idx id body resp
   for idx in $(seq 0 $((nreplies - 1))); do
     id=$(jq -r ".replies[$idx].in_reply_to // empty" "$r")
-    body=$(jq -r --arg s "$short" ".replies[$idx].body | gsub(\"\\\\{\\\\{sha\\\\}\\\\}\"; \$s)" "$r" | defang)
+    body=$(jq -r --arg s "$short" --argjson l "$links" ".replies[$idx].body | gsub(\"\\\\{\\\\{sha\\\\}\\\\}\"; \$s)
+      | gsub(\"\\\\{\\\\{deferral:(?<k>[0-9]+)\\\\}\\\\}\"; \$l[.k | tonumber])" "$r" | defang)
     posted=1
     if [ -n "$id" ]; then resp=$(gh api "repos/$repo/pulls/$n/comments/$id/replies" -f body="$body" 2>>"$LOG")
     else resp=$(gh api "repos/$repo/issues/$n/comments" -f body="$body" 2>>"$LOG"); fi
@@ -461,8 +550,10 @@ finish_fix() {
   local out
   if [ "$newsha" != "$head" ]; then out="I fixed $summary, pushed $short"; else out="I fixed nothing"; fi
   [ "$nposted" -gt 0 ] && out="$out, replied on $nposted thread(s)"
+  [ -n "$new_body" ] && out="$out, updated the PR description"
+  [ "$ndefer" -gt 0 ] && out="$out, recorded $ndefer deferral(s) ($(jq -r 'join(", ")' <<<"$links"))"
   [ -n "$want" ] && out="$out, re-requested review from $(for l in $want; do printf '@%s ' "$l"; done | sed 's/ $//; s/ /, /g')"
-  succeed "$out (verified on GitHub)."
+  succeed "$out (verified on GitHub).$esc_note"
 }
 
 # =============================== conflict: check, commit the merge, push ===============================

@@ -253,6 +253,32 @@ git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
 FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-badreply job
 check "reply to a nonexistent comment id is rejected before any write" "1 0" "$(grep -c 'malformed' "$S/notified") $([ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0)"
 check "and the branch is untouched" "$SHA" "$(git -C "$O" rev-parse refs/heads/feature-11)"
+echo "-- fix: replies may not promise or defer what the job does not do (PR 1554)"
+AR=$T/../skills/address-review/SKILL.md
+for rule in 'Check every promise before you write the result' 'If you cannot record it, do not defer' \
+  'the cheap code option and its rough size' 'quotes the description' '"done_by": "pr_body"' '{{deferral:0}}'; do
+  check "address-review prompt has the rule: $rule" 1 "$(grep -qF -- "$rule" "$AR" && echo 1 || echo 0)"
+done
+nw() { [ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0; }
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-promise-unmet job
+check "an unbacked 'I will correct the PR description' blocks posting, nothing written" "1 0" "$(grep -c 'posting blocked.*reply 1 promises an action' "$S/notified") $(nw)"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-unrecorded job
+check "deferring to another PR without a recorded deferral blocks posting" "1 0" "$(grep -c 'posting blocked.*reply 1 defers the point but links no recorded deferral' "$S/notified") $(nw)"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-foreign job
+check "a deferral comment goes only to the user's own open PR" "1 0" "$(grep -c 'deferral target #13 is not an open PR of yours' "$S/notified") $(nw)"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-docsonly job
+check "docs-only answer to a changes request: the owner is told even if the model did not escalate" 1 "$(grep -c 'verified on GitHub). NEEDS YOU: A reviewer requested changes and I changed no code' "$S/notified")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-issue job
+check "a deferral without an own target PR becomes an issue that the reply links" "1 1" "$(grep -c '^POST repos/acme/app/issues title=Enforce uniqueness body=From review.' "$S/writes.log") $(grep -c 'replies body=Out of this PR, tracked in https://github.com/acme/app/issues/99\.' "$S/writes.log")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-1554-done job
+check "dry-run says it would fix the description and record the deferral, and escalates" 1 "$(grep -c 'updated the PR description, recorded 1 deferral(s), replied on 1 thread(s).*NEEDS YOU: My call: docs now' "$S/notified")"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-1554-done job
+check "the PR description is edited on the user's own PR" "PATCH repos/acme/app/pulls/11 body=Adds the limit. It does not enforce uniqueness yet." "$(grep '^PATCH repos' "$S/writes.log")"
+check "the deferral is recorded on the target PR, linking back" "1 1" "$(grep -c '^POST repos/acme/app/issues/12/comments body=Carry over from #11' "$S/writes.log") $(grep -cx 'Deferred from the review of #11: https://x/11' "$S/writes.log")"
+check "the reply links the recorded deferral" 1 "$(grep -c 'replies body=.*recorded there: https://github.com/repos/acme/app/issues/12/comments#c889\.' "$S/writes.log")"
+check "the writes happen in order: push, description, deferral, reply" "PATCH POST POST POST" "$(grep -oE '^(PATCH|POST) repos/[^ ]*' "$S/writes.log" | head -4 | cut -d' ' -f1 | tr '\n' ' ' | sed 's/ $//')"
+check "the report carries the owner escalation" 1 "$(grep -c 'updated the PR description, recorded 1 deferral(s) (https://github.com/repos/acme/app/issues/12/comments#c889).*verified on GitHub). NEEDS YOU: My call: docs now, constraint in #12. Cheap code option' "$S/notified")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"
 
 
 echo "== conflict: merge the base into the PR branch, resolve, push"

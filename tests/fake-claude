@@ -43,6 +43,28 @@ J
   fix-many)
     echo fixed >>src/a.txt
     echo '{"summary":"x","files":["src/a.txt"],"replies":[{"in_reply_to":5001,"body":"a"},{"in_reply_to":5001,"body":"b"}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-promise-unmet) # PR 1554: promised a description fix it never made
+    echo '{"summary":"x","files":[],"replies":[{"in_reply_to":5001,"body":"Good catch, I will correct the PR description."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-defer-unrecorded) # PR 1554: deferred to another PR with nothing recorded there
+    echo '{"summary":"x","files":[],"replies":[{"in_reply_to":5001,"body":"This belongs in P3 (#12), not here."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-defer-foreign)
+    echo '{"summary":"x","files":[],"deferrals":[{"pr":13,"body":"Add the constraint."}],"replies":[{"in_reply_to":5001,"body":"Belongs in #13: {{deferral:0}}."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-defer-issue)
+    echo '{"summary":"x","files":[],"deferrals":[{"issue_title":"Enforce uniqueness","body":"From review."}],"replies":[{"in_reply_to":5001,"body":"Out of this PR, tracked in {{deferral:0}}."}],"re_request":[],"escalate":"Docs only; a 10-line constraint would close it."}' >"$jd/result.json" ;;
+  fix-docsonly) # docs-only answer to a changes request, no escalation written by the model
+    mkdir -p docs; echo limit >docs/limits.md
+    echo '{"summary":"the documented limit","files":["docs/limits.md"],"replies":[{"in_reply_to":5001,"body":"Documented the limit in {{sha}}."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-1554-done) # the same review answered properly: description fixed, deferral recorded, owner told
+    mkdir -p docs; echo limit >docs/limits.md
+    cat >"$jd/result.json" <<'J'
+{"summary": "the documented limit", "files": ["docs/limits.md"], "pr_body": "Adds the limit. It does not enforce uniqueness yet.",
+ "deferrals": [{"pr": 12, "body": "Carry over from #11: enforce uniqueness with a constraint."}],
+ "replies": [{"in_reply_to": 5001, "body": "Documented the limit in {{sha}} and corrected the PR description. The constraint belongs in P3 (#12), recorded there: {{deferral:0}}."}],
+ "promises": [{"reply": 0, "text": "corrected the PR description", "done_by": "pr_body"}],
+ "escalate": "My call: docs now, constraint in #12. Cheap code option: a unique constraint plus migration, about 10 lines.",
+ "re_request": ["bob"]}
+J
+    ;;
   hang) sleep 300 & echo $! >"$S/hang.pid"; wait ;;
   none) ;;
   crash) echo boom >&2; exit 1 ;;

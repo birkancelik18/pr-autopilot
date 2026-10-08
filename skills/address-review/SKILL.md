@@ -29,7 +29,15 @@ For each open point decide, by reading the code, whether it is genuine: a real b
 
 Make the smallest change that fixes each genuine point. Re-read your edit to check it. If you are unsure a fix is right, leave it unfixed and say why in the reply.
 
-## 4. Write `<job_dir>/result.json`
+- **PR description.** Read `body` in `pr.json`. If a review or comment quotes the description, or says something in it is false, check that against the code. When the description is wrong, write the corrected full description in `pr_body` (the script edits it on this PR) and say in the reply that you corrected it.
+- **Deferring.** You may answer "this belongs in another PR or later work" only if the job records it where it will be seen: a `deferrals` entry with `pr` (an open PR of the PR author; the script refuses any other) or, otherwise, `issue_title` (the script opens a GitHub issue). The script adds a link back to this PR and replaces `{{deferral:N}}` in your reply with the link to entry N; the reply must contain it. If you cannot record it, do not defer: fix it or escalate.
+- **Escalate to the owner.** When the reviewer asks for a code change, or the finding implies one, on a correctness, security or data-integrity point, and you answer with docs, a deferral or a reply only, write `escalate`: one paragraph with your call, the cheap code option and its rough size (for example "a unique constraint plus migration, about 10 lines"). It goes to the owner, not to the reviewer.
+
+## 4. Check every promise before you write the result
+
+List every sentence in your replies that promises or claims an action ("I will ...", "will update / correct / fix / follow up", "corrected the description", "fixed in {{sha}}"). For each, check it is done in this job: in the files you changed, in `pr_body`, or in a `deferrals` entry. Add each promise to `promises` with what backs it. If one is not done, either do it now or rewrite the sentence to say plainly that it is not done and who owns it (for example "Not changed here; this needs the PR author."). The script refuses to post replies whose promises are not backed, whose deferral links nothing, or that cite `{{sha}}` without a commit.
+
+## 5. Write `<job_dir>/result.json`
 
 Valid JSON, exactly this shape:
 
@@ -40,15 +48,20 @@ Valid JSON, exactly this shape:
   "files": ["src/a.py", "tests/test_a.py"],
   "replies": [
     {"in_reply_to": 12345, "body": "Fixed in {{sha}}: added the check."},
-    {"in_reply_to": null, "body": "Reply to a top-level comment or review body."}
+    {"in_reply_to": null, "body": "Corrected the PR description. The index belongs in #42, recorded there: {{deferral:0}}."}
   ],
-  "re_request": ["login-of-reviewer-you-fixed-or-answered"]
+  "re_request": ["login-of-reviewer-you-fixed-or-answered"],
+  "pr_body": "the corrected full PR description (empty string to leave it unchanged)",
+  "deferrals": [{"pr": 42, "body": "Carry over from review: add the unique index."}],
+  "promises": [{"reply": 1, "text": "Corrected the PR description", "done_by": "pr_body"}],
+  "escalate": ""
 }
 ```
 
 - `files` lists every file you changed (relative paths). Only these files are committed; anything else you touched is discarded. Empty when you changed nothing.
 - One reply per open point that needs an answer: either what you changed (write `{{sha}}` where the commit's short sha belongs; the script fills it in) or why you did not. One or two plain sentences, no thanks, no emoji. `in_reply_to` is the id of an inline comment from `comments.json`, or null for review-body and top-level points. Do not reply to pure thanks. There is a hard cap: no more replies than open human comments, at most 20. Do not write @mentions.
 - `re_request` lists every reviewer (people, never bots) whose points you fixed or answered, including a point you declined: they should see your reply. The script also adds anyone whose latest review requests changes.
+- `pr_body`: the full new PR description, or empty to leave it. `deferrals`: each `{"pr": N, "body": ...}` or `{"issue_title": ..., "body": ...}`, every one linked from a reply as `{{deferral:N}}` (N is its index). `promises`: each `{"reply": index in replies, "text": the promise, "done_by": "commit" | "pr_body" | "deferral:N"}`. `escalate`: the owner paragraph from step 3, or empty.
 - If nothing is genuine, make no edits, give `"summary": "nothing"`, and explain in the replies.
 
 Then stop; your final message can be one line.

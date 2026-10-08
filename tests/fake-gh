@@ -12,7 +12,7 @@ while [ $i -lt ${#args[@]} ]; do
     --jq) i=$((i + 1)); expr=${args[$i]} ;;
     -X) i=$((i + 1)); method=${args[$i]} ;;
     -f | -F)
-      i=$((i + 1)); f=${args[$i]}; method=POST; fields+=("$f")
+      i=$((i + 1)); f=${args[$i]}; [ "$method" = GET ] && method=POST; fields+=("$f")
       case $f in
         reviewers\[\]=*) reviewers+=("${f#*=}") ;;
         event=*) event=${f#*=} ;;
@@ -46,7 +46,12 @@ case "$method $ep" in
   "GET repos/"*/pulls/*/comments) cat "$FIX/comments-$(num "$ep").json" 2>/dev/null || echo '[]' ;;
   "POST repos/"*/pulls/*/comments/*/replies) echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 888}' ;;
   "GET repos/"*/issues/*/comments) cat "$FIX/issue-$(num "$ep").json" 2>/dev/null || echo '[]' ;;
-  "POST repos/"*/issues/*/comments) echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 889}' ;;
+  "POST repos/"*/issues/*/comments)
+    echo "POST $ep ${fields[*]}" >>"$W"; jq -n --arg u "https://github.com/$ep" '{id: 889, html_url: ($u + "#c889")}' | out ;;
+  "POST repos/"*/issues)
+    echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 890, "number": 99, "html_url": "https://github.com/acme/app/issues/99"}' | out ;;
+  "PATCH repos/"*/pulls/*)
+    echo "PATCH $ep ${fields[*]}" >>"$W"; printf '%s' "${fields[0]#body=}" >"$S/body-$(num "$ep")"; echo '{}' ;;
   "POST repos/"*/pulls/*/requested_reviewers)
     echo "POST $ep ${reviewers[*]}" >>"$W"
     printf '%s\n' "${reviewers[@]}" | jq -R '{login: .}' | jq -s . >"$S/requested.json"; echo '{}' ;;
@@ -57,7 +62,7 @@ case "$method $ep" in
   "GET repos/"*/pulls/*)
     n=$(num "$ep")
     sha=""; [ -n "${FAKE_HEAD_REPO:-}" ] && sha=$(git -C "$FAKE_HEAD_REPO" rev-parse refs/heads/feature-11)
-    jq --arg sha "$sha" --slurpfile rr <(cat "$S/requested.json" 2>/dev/null || echo '[]') \
-      '(if $sha != "" then .head.sha = $sha else . end) | .requested_reviewers = $rr[0]' "$FIX/pr-$n.json" | out ;;
+    jq --arg sha "$sha" --slurpfile rr <(cat "$S/requested.json" 2>/dev/null || echo '[]') --rawfile b <(cat "$S/body-$n" 2>/dev/null) \
+      '(if $sha != "" then .head.sha = $sha else . end) | .requested_reviewers = $rr[0] | if $b != "" then .body = $b else . end' "$FIX/pr-$n.json" | out ;;
   *) echo "fake gh: unexpected call: $*" >&2; exit 1 ;;
 esac
