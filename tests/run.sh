@@ -13,6 +13,8 @@ mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
 printf '#!/usr/bin/env bash\necho "TN $@" >>"$PR_AUTOPILOT_STATE/notified"; exit ${FAKE_TN_EXIT:-0}\n' >"$W/bin/terminal-notifier"
+# BSD seq (macOS) counts down for "seq 0 -1" and prints 0 and -1; this shim shows that on any machine.
+printf '#!/usr/bin/env bash\ni=$1; if [ "$1" -le "$2" ]; then s=1; else s=-1; fi\nwhile :; do echo $i; [ $i -eq $2 ] && break; i=$((i + s)); done\n' >"$W/bin/seq"
 chmod +x "$W/bin/"* "$T/fake-job"
 export PR_AUTOPILOT_SYNC_REPORT=1 PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
 S=$PR_AUTOPILOT_STATE
@@ -262,6 +264,12 @@ done
 nw() { [ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0; }
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-promise-unmet job
 check "an unbacked 'I will correct the PR description' blocks posting, nothing written" "1 0" "$(grep -c 'posting blocked.*reply 1 promises an action' "$S/notified") $(nw)"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-nothing job
+check "PR 1623: an empty result writes nothing (no issue titled null, no reply) and does not fail" "0 0" "$(nwrites 'repos/') $(grep -c 'FAILED' "$S/notified")"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-blank-deferral job
+check "a blank deferral title is refused before any write" "1 0" "$(grep -c 'malformed pr_body, escalate, deferrals or promises' "$S/notified") $(nw)"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-blank-reply job
+check "a blank reply body is refused before any write" "1 0" "$(grep -c 'result.json is malformed' "$S/notified") $(nw)"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-unrecorded job
 check "deferring to another PR without a recorded deferral blocks posting" "1 0" "$(grep -c 'posting blocked.*reply 1 defers the point but links no recorded deferral' "$S/notified") $(nw)"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-foreign job

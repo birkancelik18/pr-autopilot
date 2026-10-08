@@ -389,7 +389,7 @@ finish_fix() {
       and (contains("..") | not) and (startswith(".git") | not)))
     and (.re_request | type == "array" and all(type == "string"))
     and (.replies | type == "array" and all(
-      (.body | type == "string" and length > 0 and length < 3000)
+      (.body | type == "string" and test("\\S") and length < 3000)
       and (.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))))' "$r" >/dev/null ||
     fail "result.json is malformed or replies to a comment id that does not exist"
 
@@ -418,9 +418,9 @@ finish_fix() {
   jq -e '((.pr_body // "") | type == "string" and length < 60000)
     and ((.escalate // "") | type == "string" and length < 2000)
     and ((.deferrals // []) | type == "array" and all(
-      (.body | type == "string" and length > 0 and length < 3000)
+      (.body | type == "string" and test("\\S") and length < 3000)
       and ((.pr | type == "number" and . > 0 and . == floor) and .issue_title == null
-        or .pr == null and (.issue_title | type == "string" and length > 0 and length < 200))))
+        or .pr == null and (.issue_title | type == "string" and test("\\S") and length < 200))))
     and ((.promises // []) | type == "array" and all(
       (.reply | type == "number") and (.text | type == "string")
       and ((.done_by // "") | test("^(commit|pr_body|deferral:[0-9]+)$"))))' "$r" >/dev/null ||
@@ -522,7 +522,7 @@ finish_fix() {
   fi
   # Deferrals: recorded where they will be seen, each linking back here, before any reply links them.
   local links='[]' di dbody dpr link esc_saved=$fail_extra
-  for di in $(seq 0 $((ndefer - 1))); do
+  for ((di = 0; di < ndefer; di++)); do
     dbody="$(jq -r ".deferrals[$di].body" "$r" | defang)
 
 Deferred from the review of #$n: $url"
@@ -540,7 +540,7 @@ Deferred from the review of #$n: $url"
   done
 
   local short=${newsha:0:7} errs="" nposted=0 idx id body resp
-  for idx in $(seq 0 $((nreplies - 1))); do
+  for ((idx = 0; idx < nreplies; idx++)); do
     id=$(jq -r ".replies[$idx].in_reply_to // empty" "$r")
     body=$(jq -r --arg s "$short" --argjson l "$links" ".replies[$idx].body | gsub(\"\\\\{\\\\{sha\\\\}\\\\}\"; \$s)
       | gsub(\"\\\\{\\\\{deferral:(?<k>[0-9]+)\\\\}\\\\}\"; \$l[.k | tonumber])" "$r" | defang)

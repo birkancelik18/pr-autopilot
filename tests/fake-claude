@@ -38,6 +38,12 @@ J
   fix-decline)
     echo fixed >>src/a.txt
     echo '{"summary":"x","files":["src/a.txt"],"replies":[{"in_reply_to":5001,"body":"Fixed one, declined the other: out of scope."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-nothing) # PR 1623: the model had nothing to do and wrote empty lists
+    echo '{"summary":"nothing","commit_message":"","files":[],"replies":[],"re_request":[],"pr_body":"","deferrals":[],"promises":[],"escalate":""}' >"$jd/result.json" ;;
+  fix-blank-deferral) # a blank title must be refused before any write
+    echo '{"summary":"x","files":[],"deferrals":[{"issue_title":"  ","body":"x"}],"replies":[{"in_reply_to":5001,"body":"Tracked in {{deferral:0}}."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-blank-reply)
+    echo '{"summary":"x","files":[],"replies":[{"in_reply_to":5001,"body":" "}],"re_request":[]}' >"$jd/result.json" ;;
   fix-badreply)
     echo '{"summary":"x","replies":[{"in_reply_to":424242,"body":"hi"}],"re_request":[]}' >"$jd/result.json" ;;
   fix-many)
