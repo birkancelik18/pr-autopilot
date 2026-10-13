@@ -3,6 +3,11 @@
 # every write as one line in $PR_AUTOPILOT_STATE/writes.log.
 S=$PR_AUTOPILOT_STATE/fake; mkdir -p "$S"
 W=$PR_AUTOPILOT_STATE/writes.log
+# FAKE_GH_FLAKY=N: the first N calls fail with a transient network error (FAKE_GH_FLAKY_MSG).
+if [ -n "${FAKE_GH_FLAKY:-}" ]; then
+  c=$(cat "$S/flaky" 2>/dev/null || echo 0)
+  if [ "$c" -lt "$FAKE_GH_FLAKY" ]; then echo $((c + 1)) >"$S/flaky"; echo "${FAKE_GH_FLAKY_MSG:-Get \"https://api.github.com/user\": net/http: TLS handshake timeout}" >&2; exit 1; fi
+fi
 args=("$@"); ep="" expr="" method=GET fields=() reviewers=() event="" commit_id=""
 if [ "${1:-}" = pr ] && [ "${2:-}" = diff ]; then
   [ -n "${FAKE_DIFF_TOO_LARGE:-}" ] && { echo "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)" >&2; exit 1; }

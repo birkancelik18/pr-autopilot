@@ -16,7 +16,7 @@ printf '#!/usr/bin/env bash\necho "TN $@" >>"$PR_AUTOPILOT_STATE/notified"; exit
 # BSD seq (macOS) counts down for "seq 0 -1" and prints 0 and -1; this shim shows that on any machine.
 printf '#!/usr/bin/env bash\ni=$1; if [ "$1" -le "$2" ]; then s=1; else s=-1; fi\nwhile :; do echo $i; [ $i -eq $2 ] && break; i=$((i + s)); done\n' >"$W/bin/seq"
 chmod +x "$W/bin/"* "$T/fake-job"
-export PR_AUTOPILOT_SYNC_REPORT=1 PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
+export PR_AUTOPILOT_GH_RETRY="0 0 0" PR_AUTOPILOT_SYNC_REPORT=1 PATH="$W/bin:$PATH" FIX="$W/fix" PR_AUTOPILOT_STATE="$W/state" PR_AUTOPILOT_CONFIG="$W/config.json"
 S=$PR_AUTOPILOT_STATE
 cp -R "$T/fixtures" "$FIX"
 mkcfg() { # mkcfg <dry_run> [extra jq object]
@@ -240,6 +240,23 @@ reset; ev review false deadbeef; FAKE_CLAUDE=review job
 check "head moved before start: quiet skip, no failure, no post" "0 0" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/failed.tsv" ] && echo 1 || echo 0)"
 reset; touch "$S/paused"; ev review false; FAKE_CLAUDE=review job; rm "$S/paused"
 check "pause aborts the job before claude runs, silently" "0 0" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/claude.args" ] && echo 1 || echo 0)"
+
+echo "-- transient GitHub errors: retried inside the call, and never burn an attempt"
+reset; ev review false; FAKE_GH_FLAKY=2 FAKE_CLAUDE=review job
+check "two transient errors on the first gh calls: the job still succeeds, no failure recorded" "1 0" "$(grep -c 'live|review' "$S/handled.tsv") $([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0)"
+for m in "read: can't assign requested address" "read: connection reset by peer" "dial tcp: i/o timeout" "gh: Bad Gateway (HTTP 502)" "gh: Service Unavailable (HTTP 503)" "gh: Gateway Timeout (HTTP 504)" "You have exceeded a secondary rate limit"; do
+  reset; ev review false; FAKE_GH_FLAKY=1 FAKE_GH_FLAKY_MSG="$m" FAKE_CLAUDE=review job
+  check "retried: $m" 1 "$(grep -c 'live|review' "$S/handled.tsv")"
+done
+reset; rm -f "$S/transient.tsv"; ev review false; FAKE_GH_FLAKY=99 FAKE_CLAUDE=review job
+check "GitHub down through all retries: not an attempt, no report, noted for the next poll" "0 0 1" \
+  "$([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $(wc -l <"$S/transient.tsv" | tr -d ' ')"
+reset; ev review false; FAKE_GH_FLAKY=99 FAKE_GH_FLAKY_MSG="HTTP 404 Not Found" FAKE_CLAUDE=review job
+check "a non-transient error is not retried and burns an attempt" 1 "$(grep -c 'live|review' "$S/failed.tsv")"
+reset; ev review false; FAKE_CLAUDE=limit job
+check "claude session limit: no attempt burned, no failure report, job starts paused" "0 0 1" \
+  "$([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/claude_limited" ] && echo 1 || echo 0)"
+rm -f "$S/claude_limited"
 
 echo "-- fix, dry-run"
 reset; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job

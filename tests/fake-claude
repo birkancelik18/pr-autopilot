@@ -80,6 +80,7 @@ J
     ;;
   hang) sleep 300 & echo $! >"$S/hang.pid"; wait ;;
   none) ;;
+  limit) echo '{"type":"result","subtype":"success","result":"You'"'"'ve hit your session limit","is_error":true,"total_cost_usd":0}'; exit 1 ;;
   crash) echo boom >&2; exit 1 ;;
 esac
 if [ "${FAKE_CLAUDE:-review}" != fix ] && [ "${FAKE_CLAUDE:-review}" != fix-many ] && [ "${FAKE_CLAUDE:-review}" != fix-decline ] && [ "${FAKE_CLAUDE:-review}" != crash ]; then

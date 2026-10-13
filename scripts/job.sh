@@ -24,6 +24,7 @@ JOB=$STATE_DIR/jobs/$stamp-$slug-$n-$kind-$$
 WT=$STATE_DIR/worktrees/$slug-$n-$kind-$$
 REF=refs/pr-autopilot/$n-$$ BASEREF=refs/pr-autopilot/base-$n-$$
 mkdir -p "$JOB"
+export PR_AUTOPILOT_TRANSIENT_FILE=$JOB/transient # set by lib.sh gh() when retries ran out on a network error
 echo "# $stamp $kind $repo#$n head=$head dry_run=$dry" >"$LOG"
 clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downcase == ($r | ascii_downcase)) | .value' "$CONFIG")
 
@@ -62,6 +63,11 @@ fail() { # fail <message>: loud report; retried by the poller (max 3) unless we 
   if [ "$posted" = 1 ]; then
     echo "$DKEY" >>"$STATE_DIR/handled.tsv" # a repeat could double-post
     report "$prefix PARTLY DONE, then FAILED: $1. Not retried automatically, check the PR. Log: $LOG."
+  elif [ -e "$PR_AUTOPILOT_TRANSIENT_FILE" ] && [ "$(cat "$STATE_DIR/transient.tsv" 2>/dev/null | grep -cxF "$DKEY")" -lt 5 ]; then
+    # GitHub was unreachable even after gh()'s retries: not the PR's fault, so no attempt is burned and
+    # the next poll starts over. At most 5 times per key, then it counts like any failure.
+    echo "$DKEY" >>"$STATE_DIR/transient.tsv"
+    log "$repo#$n: GitHub unreachable ($1), not counted as an attempt, retrying next poll"
   else
     printf '%s\t%s\n' "$(date +%s)" "$DKEY" >>"$STATE_DIR/failed.tsv"
     nf=$(awk -F'\t' -v k="$DKEY" '$2 == k' "$STATE_DIR/failed.tsv" | wc -l | tr -d ' ')
@@ -288,6 +294,13 @@ if [ -z "$skip_model" ]; then
     | group_by(.m) | map(map(.c[]) | unique | length) | max // 0' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
   echo "stats: agent_calls=${agent_calls:-0} max_agents_in_one_message=${agent_parallel:-0} $(jq -r '"num_turns=\(.num_turns) duration_ms=\(.duration_ms) cost_usd=\(.total_cost_usd)"' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
   echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
+  # A spent plan is not this PR's fault: no attempt burned, and the poller starts no jobs for 30 minutes.
+  if grep -q "hit your session limit" "$JOB/claude.jsonl" 2>/dev/null; then
+    echo "claude session limit reached, job not counted as an attempt" >>"$LOG"
+    log "$repo#$n: claude session limit reached, pausing job starts for 30 minutes"
+    touch "$STATE_DIR/claude_limited"
+    exit 0
+  fi
   [ "$rc" -eq 0 ] || fail "claude exited with status $rc (143 or 137 usually means the timeout)"
   [ "$(jq -r '.is_error // false' "$JOB/claude.json" 2>/dev/null)" = false ] ||
     fail "claude reported an error: $(jq -r '.result // "?"' "$JOB/claude.json" | head -c 200)"

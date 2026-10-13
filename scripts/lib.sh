@@ -9,6 +9,30 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$STATE_DIR/polls.log"; }
 cfg() { jq -r "$1" "$CONFIG"; } # usage: cfg '.slack_webhook // ""'
 # cfgd <key> <default-json>: like cfg but keeps an explicit false (jq's // would replace it).
 cfgd() { jq -r --argjson d "$2" ".$1 as \$v | if \$v == null then \$d else \$v end" "$CONFIG"; }
+
+# gh: every call in the scripts goes through this wrapper (it shadows the binary). A transient network or
+# API error (the regex below) is retried after PR_AUTOPILOT_GH_RETRY seconds (default "2 5 10"); the
+# last try's output and exit status pass through. When retries run out on such an error, the file
+# PR_AUTOPILOT_TRANSIENT_FILE is created (job.sh uses it to not burn an attempt); each call clears it.
+GH_TRANSIENT_RE="can't assign requested address|connection reset|i/o timeout|TLS handshake timeout|HTTP (429|50[234])|secondary rate limit|error connecting to|connection refused|no such host|unexpected EOF|timeout awaiting"
+gh() {
+  local out err rc delay
+  [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || rm -f "$PR_AUTOPILOT_TRANSIENT_FILE"
+  out=$(mktemp) err=$(mktemp)
+  # The trailing "" is the last try: no sleep after it.
+  for delay in ${PR_AUTOPILOT_GH_RETRY:-2 5 10} ""; do
+    command gh "$@" >"$out" 2>"$err"; rc=$?
+    [ "$rc" -ne 0 ] || break
+    grep -qiE "$GH_TRANSIENT_RE" "$out" "$err" || break
+    if [ -z "$delay" ]; then
+      [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || : >"$PR_AUTOPILOT_TRANSIENT_FILE"
+      break
+    fi
+    sleep "$delay"
+  done
+  cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
+  return "$rc"
+}
 is_paused() { [ -f "$STATE_DIR/paused" ]; }
 
 # report <message>: macOS notification (notify-send on Linux) plus Slack if configured.
@@ -44,6 +68,8 @@ report() {
       -e 'end run' -- "$msg" >/dev/null 2>&1 || log "osascript failed"
   elif command -v notify-send >/dev/null; then
     notify-send pr-autopilot "$msg" || log "notify-send failed"
+  else
+    log "no notify-send; desktop notification skipped"
   fi
   hook=$(cfg '.slack_webhook // ""' 2>/dev/null || true)
   if [ -n "$hook" ]; then
