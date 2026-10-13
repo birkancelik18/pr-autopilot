@@ -566,6 +566,11 @@ if [ "$(uname)" = Darwin ]; then
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
 check "plugin version is 0.2.0 and the installer reports it" "0.2.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.2.0')"
+if ! command -v notify-send >/dev/null; then
+  mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
+  (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1
+  check "Linux without notify-send: logged, not silent" 1 "$(grep -c 'no notify-send; desktop notification skipped' "$S/polls.log")"
+fi
 check "uninstall and install both clear a leftover pause" 2 "$(grep -c 'rm -f "$STATE/paused"' "$T/../scripts/install-scheduler.sh")"
 check "plist PATH is XML-escaped" 1 "$(PATH='/a&b:/usr/bin:/bin' bash "$T/../scripts/install-scheduler.sh" print-plist | grep -c '/a&amp;b')"
 
