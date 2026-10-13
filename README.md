@@ -76,6 +76,14 @@ Both share one "read" marker, so a result never shows twice. The lines quote PR 
 - `/pr-autopilot:pause` is the kill switch: the poller does nothing and running jobs are stopped before they write anything. `/pr-autopilot:resume` undoes it.
 - `/pr-autopilot:replay` includes the pre-live backlog (see above).
 
+## Updating
+
+`claude plugin update pr-autopilot` only refreshes the plugin cache when the `version` in `.claude-plugin/plugin.json` changed, so **bump it with every release** (a fix with the same version never reaches users). After updating, re-run `/pr-autopilot:setup`: the scheduler runs its own copy under `~/.local/share/pr-autopilot`, and the installer refreshes that copy from the plugin and prints the version now running. `bash scripts/install-scheduler.sh version` shows the source and installed versions without changing anything.
+
+## Failures and retries
+
+Transient GitHub errors (timeouts, connection resets, 502/503/504, secondary rate limits) are retried inside every `gh` call (2s, 5s, 10s). A job that still cannot reach GitHub does not count as an attempt. A poll that fails is reported only after 5 failed polls in a row. `failed.tsv` entries are dropped when the PR's head moved, it closed, or after 7 days, so `/pr-autopilot:status` lists only active failures. When Claude reports its session limit, no job is started for 30 minutes and nothing counts as a failure.
+
 ## Uninstall
 
 ```bash

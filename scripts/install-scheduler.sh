@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# usage: install-scheduler.sh install|uninstall|print-plist|print-unit
+# usage: install-scheduler.sh install|uninstall|version|print-plist|print-unit
 # Copies the plugin to a versioned directory under ~/.local/share/pr-autopilot and points a stable
 # `plugin` symlink at it (the marketplace cache path changes on every plugin update, and a running
 # job must keep its own files). Then runs plugin/scripts/poll.sh every 60s: launchd on macOS, a
@@ -66,6 +66,13 @@ notify_test() {
   fi
 }
 
+version_of() { jq -r '.version // "unknown"' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo unknown; }
+# versions: what this script would install, and what the scheduler runs now.
+versions() {
+  echo "source:    $(version_of "$SRC") ($SRC)"
+  echo "installed: $(version_of "$DEST") ($(cd "$DEST" 2>/dev/null && pwd -P || echo "$DEST, not installed"))"
+}
+
 install() {
   for c in gh jq git claude; do command -v "$c" >/dev/null || { echo "missing: $c" >&2; exit 1; }; done
   mkdir -p "$BASE" "$STATE"
@@ -78,6 +85,7 @@ install() {
     # Drop older copies, but never under a running job.
     live_jobs || find "$BASE" -mindepth 1 -maxdepth 1 -name 'plugin-*' ! -path "$new" -exec rm -rf {} +
   fi
+  echo "Scheduler now runs pr-autopilot $(version_of "$DEST") (copied from $SRC)."
   if [ "$(uname)" = Darwin ]; then
     mkdir -p "$(dirname "$PLIST")"
     render_plist >"$PLIST"
@@ -145,8 +153,9 @@ uninstall() {
 case ${1:-} in
   install) install ;;
   notify-test) notify_test ;;
+  version) versions ;;
   uninstall) uninstall ;;
   print-plist) render_plist ;;
   print-unit) render_unit ;;
-  *) echo "usage: install-scheduler.sh install|uninstall|print-plist|print-unit" >&2; exit 2 ;;
+  *) echo "usage: install-scheduler.sh install|uninstall|version|print-plist|print-unit" >&2; exit 2 ;;
 esac
