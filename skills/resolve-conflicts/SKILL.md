@@ -17,6 +17,8 @@ You are resolving merge conflicts on the user's own PR. Arguments: $ARGUMENTS
 
 The current directory is the PR's branch with the base branch merged in and not yet committed. Each file in `<job_dir>/conflicts.txt` has conflict blocks: `<<<<<<< HEAD` (the PR's side), `=======`, `>>>>>>> <base ref>` (the base branch's side). `<job_dir>/pr.json` and `diff.patch` say what the PR is for; `conventions/` holds the repo's rules as `.txt` files.
 
+`<job_dir>/voice.md` says how anything that gets posted under the user's name must read. Read it before you write anything that will be posted, and follow it.
+
 ## 1. Understand both sides
 
 For each conflict block, work out what each side meant: read the surrounding code, the PR's description and diff, and the base side's code. Usually both changes should survive: the base side changed behaviour the PR must keep, and the PR adds what it is for.

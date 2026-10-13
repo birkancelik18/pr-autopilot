@@ -183,6 +183,9 @@ git -C "$clone" ls-tree -r --name-only "$BASEREF" -- .claude/rules 2>/dev/null |
   rel=${f#.claude/}
   git -C "$clone" show "$BASEREF:$f" >"$JOB/conventions/${rel//\//__}.txt"
 done
+# How anything that gets posted should read, shared by every skill; copied in because the model reads
+# only the checkout and the job dir. voice_check (lib.sh) enforces its "Never" list before posting.
+cp "$PLUGIN_ROOT/voice.md" "$JOB/voice.md" || fail "could not copy voice.md into the job dir"
 # The user's own review skills (config review_skills): one extra parallel pass each. They are the
 # user's text, not the PR's, so they are trusted instructions for that pass; copied into the job
 # dir because the model may not read outside it.
@@ -351,20 +354,27 @@ finish_review() {
   tail -n +2 "$JOB/draft.md" | sed '/./,$!d' >"$JOB/body.md"
   body_words=$(wc -w <"$JOB/body.md" | tr -d ' ')
   [ "$body_words" -gt 0 ] || fail "draft.md has no body"
-  if [ "$body_words" -gt 150 ]; then
-    # Do not throw a whole review away over length: one cheap follow-up asks for a shorter draft.
-    echo "draft is $body_words words, asking for a shorter one" >>"$LOG"
+  local ap="" tells fixes=""
+  [ "$event" = APPROVE ] && ap=approve
+  tells=$(voice_check $ap <"$JOB/body.md")
+  if [ "$body_words" -gt 150 ] || [ -n "$tells" ]; then
+    # Do not throw a whole review away over length or voice: one cheap follow-up asks for a rewrite.
+    [ "$body_words" -le 150 ] || fixes="shorten the body to at most 140 words, dropping nitpicks, filler and repetition first. "
+    [ -z "$tells" ] || fixes="${fixes}It reads machine-written, so rewrite it by $JOB/voice.md and remove: $tells. "
+    echo "draft is $body_words words${tells:+ and has $tells}, asking for a rewrite" >>"$LOG"
     abort_if_paused
-    run_claude "SHORTEN the review draft at $JOB/draft.md to at most 140 words in the body. Keep the first line (VERDICT) exactly as it is, keep every blocker with its file:line and failure, drop nitpicks, filler and repetition first. Edit that file only. Do not review anything again. job_dir=$JOB" "$JOB/claude-shorten.jsonl"
+    run_claude "REWRITE the review draft at $JOB/draft.md: ${fixes}Keep the first line (VERDICT) exactly as it is, keep every blocker with its file:line and failure, and keep the findings and their severity. Edit that file only. Do not review anything again. job_dir=$JOB" "$JOB/claude-rewrite.jsonl"
     cost_check
-    [ "$rc" -eq 0 ] || fail "claude exited with status $rc while shortening the draft"
+    [ "$rc" -eq 0 ] || fail "claude exited with status $rc while rewriting the draft"
     verdict2=$(head -1 "$JOB/draft.md" | tr -d '\r')
-    [ "$verdict2" = "$verdict" ] || fail "shortening changed the VERDICT line"
+    [ "$verdict2" = "$verdict" ] || fail "the rewrite changed the VERDICT line"
     tail -n +2 "$JOB/draft.md" | sed '/./,$!d' >"$JOB/body.md"
     body_words=$(wc -w <"$JOB/body.md" | tr -d ' ')
-    [ "$body_words" -gt 0 ] || fail "the shortened draft has no body"
+    [ "$body_words" -gt 0 ] || fail "the rewritten draft has no body"
+    tells=$(voice_check $ap <"$JOB/body.md")
   fi
-  [ "$body_words" -le 150 ] || fail "draft body is $body_words words even after asking for a shorter one, limit is 150"
+  [ "$body_words" -le 150 ] || fail "draft body is $body_words words even after asking for a rewrite, limit is 150"
+  [ -z "$tells" ] || fail "the draft still reads machine-written after a rewrite ($tells)"
   why=$(head -1 "$JOB/body.md" | cut -c1-160)
 
   check_head
@@ -508,6 +518,13 @@ finish_fix() {
           (if ($rs | any(.body | contains("{{deferral:\($k)}}"))) then empty else "deferral \($k) is linked from no reply" end))' "$r") ||
     fail "could not check the replies in result.json"
   [ -z "$gate" ] || fail "posting blocked, the replies do not match what the job does: $(tr '\n' ';' <<<"$gate" | sed 's/;$//')"
+  # Same voice rules as a review (voice.md): a reply that reads machine-written is not posted.
+  local ri rt tells=""
+  for ((ri = 0; ri < nreplies; ri++)); do
+    rt=$(jq -r ".replies[$ri].body" "$r" | voice_check)
+    [ -z "$rt" ] || tells="$tells reply $((ri + 1)): $rt;"
+  done
+  [ -z "$tells" ] || fail "posting blocked, a reply reads machine-written (see voice.md):${tells%;}"
   [ "$(jq '(.deferrals // []) | length' "$r")" -le 3 ] ||
     fail "refusing $(jq '.deferrals | length' "$r") deferrals (max 3), nothing written. NEEDS YOU: decide which of these points to fix here and which to track elsewhere"
   # A deferral into another PR goes only to the user's own open PR; anything else needs an issue.
@@ -583,7 +600,7 @@ finish_fix() {
   for ((di = 0; di < ndefer; di++)); do
     dbody="$(jq -r ".deferrals[$di].body" "$r" | defang)
 
-Deferred from the review of #$n: $url"
+From the review on #$n: $url"
     dpr=$(jq -r ".deferrals[$di].pr // empty" "$r")
     posted=1
     if [ -n "$dpr" ]; then

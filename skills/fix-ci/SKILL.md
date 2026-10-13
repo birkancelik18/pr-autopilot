@@ -17,6 +17,8 @@ You are fixing failing CI on the user's own PR. Arguments: $ARGUMENTS
 
 In `job_dir`: `ci/failed.json` (each failing check: name, conclusion, title, summary, text, details_url, and `log`: the exact path of its log file, or null when no log could be fetched — read that path directly, do not guess file names), the log files themselves (the last 400 lines of each failing GitHub Actions job), `pr.json`, `diff.patch`, `reviews.json`, `comments.json`, `issue-comments.json`, and `conventions/` (the repo's rules as `.txt` files; follow them when you edit). The current directory is the PR's head commit.
 
+`<job_dir>/voice.md` says how anything that gets posted under the user's name must read. Read it before you write anything that will be posted, and follow it.
+
 ## 1. Find the cause
 
 For each failing check, find the first real error in its log (a failed test with its assertion, a type error, a lint rule, a build error), not the summary lines after it. Then decide which of three it is:

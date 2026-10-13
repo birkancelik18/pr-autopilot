@@ -260,10 +260,15 @@ check "a missing review skill file fails loudly before claude runs" "1 0" "$(gre
 cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
 echo "-- review: bad drafts and failures are loud, nothing is posted"
 reset; ev review false; FAKE_CLAUDE=review-long job
-check "over 150 words: asks for a shorter draft once, then posts the shortened review" "1 1" "$(cat "$S/logs/"*review.log | grep -c 'asking for a shorter one') $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
+check "over 150 words: asks for a shorter draft once, then posts the shortened review" "1 1 1" "$(cat "$S/logs/"*review.log | grep -c 'draft is 200 words.*, asking for a rewrite') $(grep -c 'shorten the body to at most 140 words' "$S/claude.args") $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
 check "usage includes the follow-up (0.5 + 0.05)" 1 "$(cat "$S/logs/"*review.log | grep -c '^usage: total_cost_usd=0.5500$')"
 reset; ev review false; FAKE_SHORTEN_FAIL=1 FAKE_CLAUDE=review-long job
 check "still over after the follow-up fails (attempt 1 of 3) and posts nothing" "1 1 0" "$(grep -c 'FAILED (attempt 1 of 3): draft body is 200 words even after asking' "$S/notified") $(grep -c 'live|review' "$S/failed.tsv") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+check "every job dir gets the shared voice.md the skills point at" 1 "$(cmp -s "$T/../voice.md" "$(cat "$S/claude.jobdir")/voice.md" && echo 1 || echo 0)"
+reset; ev review false; FAKE_CLAUDE=review-bot job
+check "a draft with a heading and a Verdict: line gets one rewrite naming both, then posts" "1 1 1" "$(grep -c 'asking for a rewrite' "$S/logs/"*review.log) $(grep -c 'remove: a label line like Verdict:; a markdown heading' "$S/claude.args") $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
+reset; ev review false; FAKE_SHORTEN_FAIL=1 FAKE_CLAUDE=review-bot job
+check "still machine-written after the rewrite: fails (attempt 1 of 3, so it is retried), posts nothing" "1 1 0" "$(grep -c 'FAILED (attempt 1 of 3): the draft still reads machine-written after a rewrite (a label line like Verdict:; a markdown heading)' "$S/notified") $(grep -c 'live|review' "$S/failed.tsv") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
 reset; jq '. + {max_cost_usd_per_job: 0.1}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"; ev review false; FAKE_CLAUDE=review job
 check "cost over max_cost_usd_per_job is reported but nothing is stopped" "1 1" "$(grep -c 'Cost warning: this job cost about $0.5000, over max_cost_usd_per_job=0.1' "$S/notified") $(cat "$S/writes.log" | grep -c 'event=APPROVE')"
 cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
@@ -356,6 +361,8 @@ done
 nw() { [ -e "$S/writes.log" ] && wc -l <"$S/writes.log" | tr -d ' ' || echo 0; }
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-promise-unmet job
 check "an unbacked 'I will correct the PR description' blocks posting, nothing written" "1 0" "$(grep -c 'posting blocked.*reply 1 promises an action' "$S/notified") $(nw)"
+reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-bot job
+check "a reply with a bold Summary: label blocks posting before the push, nothing written" "1 0 $SHA" "$(grep -c 'posting blocked, a reply reads machine-written (see voice.md): reply 1: a label line like Verdict:; a line starting with a bold label' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-nothing job
 check "PR 1623: an empty result writes nothing (no issue titled null, no reply) and does not fail" "0 0" "$(nwrites 'repos/') $(grep -c 'FAILED' "$S/notified")"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-blank-deferral job
@@ -398,7 +405,7 @@ git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix true; FAKE_HE
 check "dry-run says it would fix the description and record the deferral, and escalates" 1 "$(grep -c 'updated the PR description, recorded 1 deferral(s), replied on 1 thread(s).*NEEDS YOU: My call: docs now' "$S/notified")"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-1554-done job
 check "the PR description is edited on the user's own PR" "PATCH repos/acme/app/pulls/11 body=Adds the limit. It does not enforce uniqueness yet." "$(grep '^PATCH repos' "$S/writes.log")"
-check "the deferral is recorded on the target PR, linking back" "1 1" "$(grep -c '^POST repos/acme/app/issues/12/comments body=Carry over from #11' "$S/writes.log") $(grep -cx 'Deferred from the review of #11: https://x/11' "$S/writes.log")"
+check "the deferral is recorded on the target PR, linking back" "1 1" "$(grep -c '^POST repos/acme/app/issues/12/comments body=Carry over from #11' "$S/writes.log") $(grep -cx 'From the review on #11: https://x/11' "$S/writes.log")"
 check "the reply links the recorded deferral" 1 "$(grep -c 'replies body=.*recorded there: https://github.com/repos/acme/app/issues/12/comments#c889\.' "$S/writes.log")"
 check "the writes happen in order: push, description, deferral, reply" "PATCH POST POST POST" "$(grep -oE '^(PATCH|POST) repos/[^ ]*' "$S/writes.log" | head -4 | cut -d' ' -f1 | tr '\n' ' ' | sed 's/ $//')"
 check "the report carries the owner escalation" 1 "$(grep -c 'updated the PR description, recorded 1 deferral(s) (https://github.com/repos/acme/app/issues/12/comments#c889).*verified on GitHub). NEEDS YOU: My call: docs now, constraint in #12. Cheap code option' "$S/notified")"
@@ -579,6 +586,17 @@ rm -f "$S/inbox.jsonl"; check "hook with no inbox at all: silent, exit 0" "0 " "
 check "plugin hooks.json wires UserPromptSubmit to inbox.sh hook" 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/inbox.sh" hook' "$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$T/../hooks/hooks.json")"
 check "slack text is escaped" "&lt;!channel&gt; a&amp;b" "$(printf '<!channel> a&b' | (. "$T/../scripts/lib.sh"; slack_escape))"
 check "mentions are defanged" 'hi `@bob` and `@org/team`' "$(printf 'hi @bob and @org/team' | (. "$T/../scripts/lib.sh"; defang) | tr -d '\n')"
+vc() { (. "$T/../scripts/lib.sh"; voice_check "$@"); }
+check "voice_check names every machine tell" "a bot phrase; a label line like Verdict:; a line starting with a bold label; a markdown heading; a markdown table; a severity tag like [blocker]; an em dash" \
+  "$(printf '### Review\n| a | b |\n- **Blocker**: x\nEvidence: y\n[P1] z \342\200\224 w\nHope this helps!\n' | vc)"
+check "voice_check ignores headings, tables and labels inside code blocks" "" "$(printf 'Needs a change:\n```suggestion\n# Summary: keep\n| x |\n```\n#12 lands first.\n' | vc)"
+long=$(for i in $(seq 1 61); do printf 'fine '; done)
+check "an APPROVE over 60 words with no nit is flagged; with a nit, or a REQUEST_CHANGES, it is not" "an APPROVE of 61 words with nothing marked as a nit (max 60)||" \
+  "$(echo "$long" | vc approve)|$(echo "$long nit: x" | vc approve)|$(echo "$long" | vc)"
+for n in 1 2; do
+  awk -v n=$n '/^After:/ {c++; f = (c == n); next} /^(Review|Replies)/ {f = 0} f && /^>/' "$T/../voice.md" | sed 's/^> \{0,1\}//' >"$W/after$n"
+  check "voice.md example $n (after) passes its own check and the 150-word cap" "ok" "$([ -s "$W/after$n" ] && [ "$(wc -w <"$W/after$n")" -le 150 ] && [ -z "$(vc approve <"$W/after$n")" ] && echo ok)"
+done
 jq -n '{repos: ([range(0;30) | {key: "some-organisation/a-rather-long-repository-name-\(.)", value: "/x"}] | from_entries)}' >"$W/c5.json"
 chunks=$(PR_AUTOPILOT_CONFIG=$W/c5.json bash -c '. '"$T"'/../scripts/lib.sh; repo_chunks 200')
 check "search query is split into chunks under the length limit" "ok" "$(awk 'length($0) > 200 {bad=1} END {print bad ? "too long" : "ok"}' <<<"$chunks")"

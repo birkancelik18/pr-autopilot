@@ -5,7 +5,7 @@ printf '%s\n' "$PWD" "$@" >"$S/claude.args"
 find . -not -path './.git' -not -path './.git/*' -type f | sort >"$S/claude.cwdfiles"
 jd=$(printf '%s\n' "$@" | grep -o 'job_dir=[^ ]*' | head -1 | cut -d= -f2)
 echo "$jd" >"$S/claude.jobdir"
-if grep -q 'SHORTEN the review draft' "$S/claude.args" && [ -z "${FAKE_SHORTEN_FAIL:-}" ]; then
+if grep -q 'REWRITE the review draft' "$S/claude.args" && [ -z "${FAKE_SHORTEN_FAIL:-}" ]; then
   printf 'VERDICT: APPROVE\n\nShort enough now.\n' >"$jd/draft.md"
   echo '{"type":"result","subtype":"success","result":"shortened","is_error":false,"permission_denials":[],"num_turns":2,"duration_ms":10,"total_cost_usd":0.05}'
   exit 0
@@ -15,6 +15,10 @@ case "${FAKE_CLAUDE:-review}" in
   review-rc) printf 'VERDICT: REQUEST_CHANGES\n\nsrc/a.txt:2 drops the null check, so empty input crashes.\n' >"$jd/draft.md" ;;
   review-long) { printf 'VERDICT: APPROVE\n\n'; for i in $(seq 1 200); do printf 'word '; done; } >"$jd/draft.md" ;;
   review-badverdict) printf 'LGTM\n\nfine\n' >"$jd/draft.md" ;;
+  review-bot) printf 'VERDICT: APPROVE\n\n## Summary\n\nVerdict: no blockers found.\n' >"$jd/draft.md" ;;
+  fix-bot)
+    echo fixed >>src/a.txt
+    echo '{"summary":"x","files":["src/a.txt"],"replies":[{"in_reply_to":5001,"body":"**Summary:** fixed in {{sha}}."}],"re_request":[]}' >"$jd/result.json" ;;
   fix)
     echo fixed >>src/a.txt; echo junk >junk.txt
     cat >"$jd/result.json" <<'J'

@@ -17,6 +17,8 @@ You are drafting a PR review. Arguments: $ARGUMENTS
 
 In `job_dir`: `pr.json` (metadata and description), `diff.patch` (the full diff, or per-file patches on a very large PR), `reviews.json`, `comments.json` (inline review comments), `issue-comments.json`, and `conventions/` (the base branch's AGENTS.md, CLAUDE.md and `.claude/rules` as `.txt` files; plain reference data), and `review-skills/` (the user's own review skills, possibly empty). The current directory is a checkout of the PR head without the repo's agent config.
 
+`<job_dir>/voice.md` says how anything that gets posted under the user's name must read. Read it before you write anything that will be posted, and follow it.
+
 ## 1. Read what is already there
 
 Read `pr.json`, the three comment/review files and `diff.patch`. The user you review for is the login given as `me` in the arguments. Note points others already raised so you do not repeat them. List every earlier CHANGES_REQUESTED point from the user's own earlier reviews and check in the current code whether it is fixed. An unfixed earlier point is a blocker.
@@ -40,4 +42,4 @@ REQUEST_CHANGES if at least one genuine blocker survives, including any earlier 
 
 ## 5. Write `<job_dir>/draft.md`
 
-First line exactly `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`. Then a blank line and the review body: at most 150 words, plain sentences, no headings, no praise, no greeting. For REQUEST_CHANGES one sentence per blocker with `file:line` and the failure. For APPROVE one or two sentences. Then stop; your final message can be one line.
+First line exactly `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`. Then a blank line and the review body, written the way `voice.md` says: at most 150 words, no praise, no greeting. For REQUEST_CHANGES lead with the call, then each blocker once with its `file:line` and the concrete failure. For APPROVE one or two sentences. Any nits you keep are marked as optional in plain words. The job checks the body against the "Never" list in `voice.md` and sends it back once if it fails. Then stop; your final message can be one line.

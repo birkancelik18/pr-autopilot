@@ -17,6 +17,8 @@ You are fixing review feedback on the user's own PR. Arguments: $ARGUMENTS
 
 In `job_dir`: `pr.json`, `diff.patch`, `reviews.json`, `comments.json` (inline review comments; `in_reply_to_id` links replies into threads), `issue-comments.json`, and `conventions/` (the base branch's AGENTS.md, CLAUDE.md and `.claude/rules` as `.txt` reference files; follow them when you edit).
 
+`<job_dir>/voice.md` says how anything that gets posted under the user's name must read. Read it before you write anything that will be posted, and follow it.
+
 ## 1. Collect open feedback
 
 A point is open when it comes from someone other than `me` (the PR author) and no later reply from the PR author is in its thread, or it is the body of a CHANGES_REQUESTED review (take each reviewer's latest review) or a top-level comment that no later reply answers. Ignore pure thanks and praise, and bot status chatter.
@@ -59,7 +61,7 @@ Valid JSON, exactly this shape:
 ```
 
 - `files` lists every file you changed (relative paths). Only these files are committed; anything else you touched is discarded. Empty when you changed nothing.
-- One reply per open point that needs an answer: either what you changed (write `{{sha}}` where the commit's short sha belongs; the script fills it in) or why you did not. One or two plain sentences, no thanks, no emoji. `in_reply_to` is the id of an inline comment from `comments.json`, or null for review-body and top-level points. Do not reply to pure thanks. There is a hard cap: no more replies than open human comments, at most 20. Do not write @mentions.
+- One reply per open point that needs an answer: either what you changed (write `{{sha}}` where the commit's short sha belongs; the script fills it in) or why you did not. One or two sentences written the way `voice.md` says, no thanks, no emoji; a reply that breaks its "Never" list is not posted and the job fails. `in_reply_to` is the id of an inline comment from `comments.json`, or null for review-body and top-level points. Do not reply to pure thanks. There is a hard cap: no more replies than open human comments, at most 20. Do not write @mentions.
 - `re_request` lists every reviewer (people, never bots) whose points you fixed or answered, including a point you declined: they should see your reply. The script also adds anyone whose latest review requests changes.
 - `pr_body`: the full new PR description, or empty to leave it. `deferrals`: each `{"pr": N, "body": ...}` or `{"issue_title": ..., "body": ...}`, every one linked from a reply as `{{deferral:N}}` (N is its index). `promises`: each `{"reply": index in replies, "text": the promise, "done_by": "commit" | "pr_body" | "deferral:N"}`. `escalate`: the owner paragraph from step 3, or empty.
 - If nothing is genuine, make no edits, give `"summary": "nothing"`, and explain in the replies.

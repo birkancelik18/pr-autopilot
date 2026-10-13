@@ -116,6 +116,28 @@ slack_escape() { jq -Rrs 'gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&g
 # defang: model-written text must not ping people; wrap @mentions in backticks.
 defang() { jq -Rrs 'gsub("@(?<n>[A-Za-z0-9_][A-Za-z0-9_/-]*)"; "`@\(.n)`")'; }
 
+# voice_check [approve]: model-written text to be posted on stdin; prints the machine tells it finds,
+# "; "-joined (nothing when it reads like a person). The "Never" list in voice.md, which the model is
+# given: keep both in step. Fenced code (suggestion blocks) is skipped.
+voice_check() {
+  LC_ALL=C awk -v approve="${1:-}" '
+    /^[ \t]*(```|~~~)/ { code = !code; next }
+    code { next }
+    { words += NF; l = tolower($0) }
+    /^ ? ? ?#+([ \t]|$)/ { p["a markdown heading"] = 1 }
+    /^[ \t]*\|.*\|/ { p["a markdown table"] = 1 }
+    l ~ /^[ \t]*([-*][ \t]+)?(\*\*)?(verdict|evidence|summary|findings|severity|recommendation|conclusion)(\*\*)?[ \t]*(\*\*)?:/ { p["a label line like Verdict:"] = 1 }
+    /^[ \t]*([-*][ \t]+)?\*\*[^*]+\*\*/ { p["a line starting with a bold label"] = 1 }
+    l ~ /\[(blocker|nit|major|minor|critical|high|medium|low|p[0-3])\]/ { p["a severity tag like [blocker]"] = 1 }
+    index($0, "\342\200\224") { p["an em dash"] = 1 }
+    l ~ /hope this helps|let me know if|as an ai|generated (by|with) / { p["a bot phrase"] = 1 }
+    l ~ /(^|[^a-z])nits?([^a-z]|$)|not blocking|non-blocking|optional/ { nit = 1 }
+    END {
+      if (approve != "" && words > 60 && !nit) p["an APPROVE of " words " words with nothing marked as a nit (max 60)"] = 1
+      for (k in p) print k
+    }' | sort | paste -sd ';' - | sed 's/;/; /g'
+}
+
 # gc: drop leftovers of dead jobs (worktrees, refs) and rotate logs. Called by poll.sh.
 # Directory and ref names end in the owning job's pid.
 gc() {
