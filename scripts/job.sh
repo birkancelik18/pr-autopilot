@@ -19,6 +19,7 @@ mode=live; [ "$dry" = true ] && mode=dry
 DKEY="$mode|$key"
 
 slug=${repo//\//_} stamp=$(date +%Y%m%dT%H%M%S)
+JOB_START=$(date -u +%FT%TZ) # read-backs after an ambiguous write only accept what was created since now
 LOG=$STATE_DIR/logs/$stamp-$slug-$n-$kind.log
 JOB=$STATE_DIR/jobs/$stamp-$slug-$n-$kind-$$
 WT=$STATE_DIR/worktrees/$slug-$n-$kind-$$
@@ -109,12 +110,14 @@ check_head() { # PR still open, ready, and at the head we worked on
   [ "$cur" = "open false $head" ] || skip_quietly "PR changed while the job ran ($cur), nothing written"
 }
 gh_get() { gh api "$@" 2>>"$LOG"; }
-# own_comment <comments endpoint> <body>: the JSON of our own comment with exactly this body, if there is
-# one. After a POST that failed ambiguously (the server may have applied it) this tells "already there"
+# own_comment <comments endpoint> <body> [reply-to comment id]: the JSON of our own comment with exactly
+# this body, created since this job started (and in that thread), if there is one. Without the time and
+# thread checks a repeated short reply would match an older comment. After a POST that failed ambiguously (the server may have applied it) this tells "already there"
 # from "never arrived", so a retry cannot post twice.
 own_comment() {
-  gh_get --paginate "$1" | jq -s --arg me "$me" --arg b "$2" \
-    'def n: gsub("\r"; "") | sub("\\s+$"; ""); [add // [] | .[] | select(.user.login == $me and (.body | n) == ($b | n))] | first // empty'
+  gh_get --paginate "$1" | jq -s --arg me "$me" --arg b "$2" --arg since "$JOB_START" --arg rt "${3:-}" \
+    'def n: gsub("\r"; "") | sub("\\s+$"; ""); [add // [] | .[] | select(.user.login == $me and (.body | n) == ($b | n)
+      and (.created_at // "") >= $since and ($rt == "" or (.in_reply_to_id | tostring) == $rt))] | first // empty'
 }
 
 # --- preflight
@@ -389,8 +392,8 @@ finish_review() {
     -F body=@"$JOB/body.safe.md" 2>>"$LOG")
   rid=$(jq -r '.id // empty' <<<"$resp" 2>/dev/null)
   if [ -z "$rid" ]; then # ambiguous failure: did the review land anyway?
-    rid=$(gh_get --paginate "repos/$repo/pulls/$n/reviews" | jq -rs --arg me "$me" --arg h "$head" --arg s "$state" \
-      '[add // [] | .[] | select(.user.login == $me and .commit_id == $h and .state == $s)] | last | .id // empty')
+    rid=$(gh_get --paginate "repos/$repo/pulls/$n/reviews" | jq -rs --arg me "$me" --arg h "$head" --arg s "$state" --arg since "$JOB_START" \
+      '[add // [] | .[] | select(.user.login == $me and .commit_id == $h and .state == $s and (.submitted_at // "") >= $since)] | last | .id // empty')
     [ -z "$rid" ] || echo "review POST failed but the review is on GitHub ($rid), not re-sending" >>"$LOG"
   fi
   [ -n "$rid" ] || fail "posting the review failed"
@@ -589,8 +592,8 @@ Deferred from the review of #$n: $url"
     else
       dtitle=$(jq -r ".deferrals[$di].issue_title" "$r" | defang)
       link=$(gh api "repos/$repo/issues" -f title="$dtitle" -f body="$dbody" --jq '.html_url // empty' 2>>"$LOG")
-      [ -n "$link" ] || link=$(gh_get --paginate "repos/$repo/issues?creator=$me&state=open&per_page=100" | jq -rs --arg t "$dtitle" --arg b "$dbody" \
-        'def n: gsub("\r"; "") | sub("\\s+$"; ""); [add // [] | .[] | select(.title == $t and (.body // "" | n) == ($b | n))] | first | .html_url // empty')
+      [ -n "$link" ] || link=$(gh_get --paginate "repos/$repo/issues?creator=$me&state=open&per_page=100" | jq -rs --arg t "$dtitle" --arg b "$dbody" --arg since "$JOB_START" \
+        'def n: gsub("\r"; "") | sub("\\s+$"; ""); [add // [] | .[] | select((.created_at // "") >= $since and .title == $t and (.body // "" | n) == ($b | n))] | first | .html_url // empty')
     fi
     [ -n "$link" ] || fail "recording deferral $di failed, no reply was posted"
     links=$(jq -c --arg l "$link" '. + [$l]' <<<"$links")
@@ -606,7 +609,7 @@ Deferred from the review of #$n: $url"
     if [ -n "$id" ]; then resp=$(gh api "repos/$repo/pulls/$n/comments/$id/replies" -f body="$body" 2>>"$LOG")
     else resp=$(gh api "repos/$repo/issues/$n/comments" -f body="$body" 2>>"$LOG"); fi
     if [ -z "$(jq -r '.id // empty' <<<"$resp" 2>/dev/null)" ]; then # ambiguous failure: already there?
-      if [ -n "$id" ]; then resp=$(own_comment "repos/$repo/pulls/$n/comments" "$body")
+      if [ -n "$id" ]; then resp=$(own_comment "repos/$repo/pulls/$n/comments" "$body" "$id")
       else resp=$(own_comment "repos/$repo/issues/$n/comments" "$body"); fi
     fi
     if [ -n "$(jq -r '.id // empty' <<<"$resp" 2>/dev/null)" ]; then nposted=$((nposted + 1))

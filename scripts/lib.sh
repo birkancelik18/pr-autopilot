@@ -22,8 +22,8 @@ GH_REJECTED_RE="HTTP 429|secondary rate limit"
 gh() {
   local out err rc delay re=$GH_TRANSIENT_RE write=0 a prev=""
   for a in "$@"; do
-    case $prev$a in
-      -XPOST | -XPATCH | -XPUT | -XDELETE | -f* | -F* | --field* | --raw-field* | --method*) write=1 ;;
+    case $(printf '%s' "$prev$a" | tr a-z A-Z) in # upper-cased: "-X post" is a write too
+      -XPOST | -XPATCH | -XPUT | -XDELETE | -F* | --FIELD* | --RAW-FIELD* | --METHOD*) write=1 ;;
     esac
     prev=$a
   done

@@ -312,6 +312,8 @@ check "review: POST answered 502 but applied: read back, exactly one review, suc
   check "gh() does not retry a POST on a 502 (one call, it fails)" "1 1" "$rc $(cat "$S/fake/flaky")"
   rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 FAKE_GH_FLAKY_MSG="You have exceeded a secondary rate limit" gh api -X POST repos/acme/app/issues/1/comments -f body=x >/dev/null 2>&1; rc=$?
   check "gh() does retry a POST on a secondary rate limit" "0 2" "$rc $(cat "$S/fake/flaky")"
+  rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api -X post repos/acme/app/issues/1/comments >/dev/null 2>&1; rc=$?
+  check "gh() classifies a lowercase -X post as a write: no retry on 502" "1 1" "$rc $(cat "$S/fake/flaky")"
   rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api repos/acme/app/pulls/11 >/dev/null 2>&1; rc=$?
   check "gh() still retries a read on a 502-class error" "0 2" "$rc $(cat "$S/fake/flaky")"
   echo "$pass $fail" >"$W/counts"
@@ -377,6 +379,13 @@ check "description read back with CRLF and trailing space still verifies" 1 "$(g
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
 FAKE_HEAD_REPO=$O FAKE_GH_FAIL="POST repos/acme/app/pulls/11/comments/5001/replies" FAKE_CLAUDE=fix-1554-done job
 check "a failure after the gate still tells the owner NEEDS YOU" 1 "$(grep -c 'PARTLY DONE, then FAILED: after the push: reply 1 failed;.*NEEDS YOU: My call: docs now' "$S/notified")"
+echo "-- read-back never mistakes an older or other-thread comment of mine for the write that just failed"
+for case in "2020-01-01T00:00:00Z 5001" "2999-01-01T00:00:00Z 9999"; do
+  git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; mkdir -p "$S/fake"
+  jq -n --arg t "${case% *}" --argjson r "${case#* }" '[{id: 1, user: {login: "me"}, body: "Fixed one, declined the other: out of scope.", created_at: $t, in_reply_to_id: $r}]' >"$S/fake/posted-comments.json"
+  FAKE_HEAD_REPO=$O FAKE_GH_FAIL="POST repos/acme/app/pulls/11/comments/5001/replies" FAKE_CLAUDE=fix-decline job
+  check "identical reply (created/thread: $case) is not taken as posted: the job fails loudly" 1 "$(grep -c 'FAILED: after the push: reply 1 failed' "$S/notified")"
+done
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false
 FAKE_HEAD_REPO=$O FAKE_GH_FAIL="POST repos/acme/app/issues" FAKE_CLAUDE=fix-two-deferrals job
 check "a failed second deferral lists the one already recorded, no reply posted" "1 0" "$(grep -c 'FAILED: recording deferral 1 failed, no reply was posted. Already recorded, clean up if needed: https://github.com/repos/acme/app/issues/12/comments#c889. NEEDS YOU: Two deferred points' "$S/notified") $(nwrites replies)"

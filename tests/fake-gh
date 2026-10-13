@@ -38,7 +38,7 @@ if [ -n "${FAKE_WRITE_502:-}" ] && [ "$method" != GET ] && [ -z "${FAKE_IN_502:-
   FAKE_IN_502=1 "$0" "$@" >/dev/null 2>&1; echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1
 fi
 store() { # store <html_url>: remember a created comment/issue for later GETs
-  jq -n --arg u "$1" --arg b "${bodyv:-}" --arg t "${titlev:-}" '{id: 5555, user: {login: "me"}, body: $b, html_url: $u} + (if $t != "" then {title: $t} else {} end)' >"$S/new1"
+  jq -n --arg u "$1" --arg b "${bodyv:-}" --arg t "${titlev:-}" --arg rt "${2:-}" '{id: 5555, user: {login: "me"}, body: $b, html_url: $u, created_at: (now | todate)} + (if $rt != "" then {in_reply_to_id: ($rt | tonumber)} else {} end) + (if $t != "" then {title: $t} else {} end)' >"$S/new1"
   jq -s 'add' <(cat "$S/posted-comments.json" 2>/dev/null || echo '[]') <(jq -s . "$S/new1") >"$S/p1.tmp" && mv "$S/p1.tmp" "$S/posted-comments.json"
 }
 merged() { jq -s 'add' <(cat "$1" 2>/dev/null || echo '[]') <(cat "$S/posted-comments.json" 2>/dev/null || echo '[]'); }
@@ -59,12 +59,12 @@ case "$method $ep" in
   "POST repos/"*/pulls/*/reviews)
     state=APPROVED; [ "$event" = REQUEST_CHANGES ] && state=CHANGES_REQUESTED
     echo "POST $ep event=$event commit_id=$commit_id" >>"$W"
-    jq -n --arg c "$commit_id" --arg s "$state" '{id: 777, user: {login: "me"}, commit_id: $c, state: $s}' >"$S/new"
+    jq -n --arg c "$commit_id" --arg s "$state" '{id: 777, user: {login: "me"}, commit_id: $c, state: $s, submitted_at: (now | todate)}' >"$S/new"
     jq -s 'add' <(cat "$S/posted-reviews.json" 2>/dev/null || echo '[]') <(jq -s . "$S/new") >"$S/p.tmp" && mv "$S/p.tmp" "$S/posted-reviews.json"
     cat "$S/new" ;;
   "GET repos/"*/pulls/*/files) cat "$FIX/files-$(num "$ep").json" ;;
   "GET repos/"*/pulls/*/comments) merged "$FIX/comments-$(num "$ep").json" ;;
-  "POST repos/"*/pulls/*/comments/*/replies) echo "POST $ep ${fields[*]}" >>"$W"; store "https://github.com/$ep#c888"; echo '{"id": 888}' ;;
+  "POST repos/"*/pulls/*/comments/*/replies) echo "POST $ep ${fields[*]}" >>"$W"; store "https://github.com/$ep#c888" "$(sed -E 's#.*/comments/([0-9]+)/replies#\1#' <<<"$ep")"; echo '{"id": 888}' ;;
   "GET repos/"*/issues\?*) jq '[.[] | select(.title != null)]' <(merged /dev/null) ;;
   "GET repos/"*/issues/*/comments) merged "$FIX/issue-$(num "$ep").json" ;;
   "POST repos/"*/issues/*/comments)
