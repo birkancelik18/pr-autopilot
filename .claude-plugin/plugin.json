@@ -1,6 +1,6 @@
 {
   "name": "pr-autopilot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Polls your GitHub notifications and, when someone asks you to review a PR or reviews yours, runs headless Claude to review or fix it as you.",
   "author": { "name": "Birkan Celik" },
   "license": "MIT"
