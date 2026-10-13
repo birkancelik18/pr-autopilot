@@ -142,7 +142,8 @@ check "one failed poll followed by a good one: the counter is back to 0" 0 "$(ca
 : >"$S/seen.tsv"; bump 12; now=$(date +%s)
 printf '1\tdry|cifix|acme/app|12|ccc999\n%s\tdry|cifix|acme/app|12|oldhead\n%s\tdry|review|acme/app|999|x\n%s\tdry|cifix|acme/app|12|ccc999\n' "$now" "$now" "$now" >"$S/failed.tsv"
 FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll
-check "failed.tsv keeps only the recent failure of the PR's current key" "$now	dry|cifix|acme/app|12|ccc999" "$(cat "$S/failed.tsv")"
+check "failed.tsv drops the old-key and over-age entries; a PR merely absent from the list keeps its entry" "$now	dry|review|acme/app|999|x
+$now	dry|cifix|acme/app|12|ccc999" "$(cat "$S/failed.tsv")"
 printf '%s\tdry|cifix|acme/app|12|ccc999\n' "$now" >"$S/failed.tsv"; bash "$T/../scripts/ctl.sh" status >"$W/status.txt"
 check "status lists it once, as an active failure" 1 "$(grep -c '^  1x dry|cifix|acme/app|12|ccc999$' "$W/status.txt")"
 
@@ -295,6 +296,28 @@ check "claude session limit: no attempt burned, no failure report, job starts pa
   "$([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/claude_limited" ] && echo 1 || echo 0)"
 rm -f "$S/claude_limited"
 
+reset; rm -f "$S/failed.tsv"
+for i in 1 2 3 4 5; do printf '%s\tlive|review|acme/app|11|%s\n' "$(date +%s)" "$SHA" >>"$S/transient.tsv"; done
+ev review false; FAKE_CLAUDE=limit job
+check "session limit cannot loop forever: after 5 unpaid runs in a day it burns an attempt" 1 "$(grep -c 'live|review' "$S/failed.tsv")"
+rm -f "$S/claude_limited" "$S/transient.tsv"
+reset; ev review false; FAKE_CLAUDE=review-limit-text job
+check "the phrase inside tool results/PR content is not a session limit: normal run, no pause" "1 0" "$(grep -c 'live|review' "$S/handled.tsv") $([ -e "$S/claude_limited" ] && echo 1 || echo 0)"
+echo "-- a write the server applied before answering 502 is never sent twice"
+reset; rm -f "$S/posted-comments.json"; ev review false; FAKE_WRITE_502=1 FAKE_CLAUDE=review job
+check "review: POST answered 502 but applied: read back, exactly one review, success" "1 1" "$(nwrites 'POST .*reviews') $(grep -c 'live|review' "$S/handled.tsv")"
+(
+  . "$T/../scripts/lib.sh"; mkdir -p "$S/fake"
+  rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api -X POST repos/acme/app/issues/1/comments -f body=x >/dev/null 2>&1; rc=$?
+  check "gh() does not retry a POST on a 502 (one call, it fails)" "1 1" "$rc $(cat "$S/fake/flaky")"
+  rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 FAKE_GH_FLAKY_MSG="You have exceeded a secondary rate limit" gh api -X POST repos/acme/app/issues/1/comments -f body=x >/dev/null 2>&1; rc=$?
+  check "gh() does retry a POST on a secondary rate limit" "0 2" "$rc $(cat "$S/fake/flaky")"
+  rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api repos/acme/app/pulls/11 >/dev/null 2>&1; rc=$?
+  check "gh() still retries a read on a 502-class error" "0 2" "$rc $(cat "$S/fake/flaky")"
+  echo "$pass $fail" >"$W/counts"
+)
+read -r pass fail <"$W/counts"
+
 echo "-- fix, dry-run"
 reset; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
 check "fix allow list: edits in worktree + result file + test commands, no gh, no git" 0 "$(allow | grep -cE 'gh |git |Skill')"
@@ -359,6 +382,9 @@ FAKE_HEAD_REPO=$O FAKE_GH_FAIL="POST repos/acme/app/issues" FAKE_CLAUDE=fix-two-
 check "a failed second deferral lists the one already recorded, no reply posted" "1 0" "$(grep -c 'FAILED: recording deferral 1 failed, no reply was posted. Already recorded, clean up if needed: https://github.com/repos/acme/app/issues/12/comments#c889. NEEDS YOU: Two deferred points' "$S/notified") $(nwrites replies)"
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-issue job
 check "a deferral without an own target PR becomes an issue that the reply links" "1 1" "$(grep -c '^POST repos/acme/app/issues title=Enforce uniqueness body=From review.' "$S/writes.log") $(grep -c 'replies body=Out of this PR, tracked in https://github.com/acme/app/issues/99\.' "$S/writes.log")"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; rm -f "$S/posted-comments.json"; ev fix false; FAKE_WRITE_502=1 FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-defer-issue job
+check "issue and reply POSTs answered 502 but applied: each written exactly once (read back, not re-sent)" "1 1" "$(nwrites '^POST repos/acme/app/issues title') $(nwrites 'replies body=')"
+git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"; reset; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-1554-done job
 check "dry-run says it would fix the description and record the deferral, and escalates" 1 "$(grep -c 'updated the PR description, recorded 1 deferral(s), replied on 1 thread(s).*NEEDS YOU: My call: docs now' "$S/notified")"
 reset; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-1554-done job

@@ -12,20 +12,32 @@ cfgd() { jq -r --argjson d "$2" ".$1 as \$v | if \$v == null then \$d else \$v e
 
 # gh: every call in the scripts goes through this wrapper (it shadows the binary). A transient network or
 # API error (the regex below) is retried after PR_AUTOPILOT_GH_RETRY seconds (default "2 5 10"); the
-# last try's output and exit status pass through. When retries run out on such an error, the file
-# PR_AUTOPILOT_TRANSIENT_FILE is created (job.sh uses it to not burn an attempt); each call clears it.
+# last try's output and exit status pass through. Writes (-X POST/PATCH/PUT/DELETE, -f/-F fields, gh pr
+# review/comment/create/edit) are retried only on 429 / secondary rate limit, which GitHub rejects before
+# applying anything: after a 502 or a reset the write may have landed, and a blind resend would post twice
+# as the user (job.sh reads back before re-sending). When retries run out on a read, the file
+# PR_AUTOPILOT_TRANSIENT_FILE is created (job.sh uses it to not burn an attempt).
 GH_TRANSIENT_RE="can't assign requested address|connection reset|i/o timeout|TLS handshake timeout|HTTP (429|50[234])|secondary rate limit|error connecting to|connection refused|no such host|unexpected EOF|timeout awaiting"
+GH_REJECTED_RE="HTTP 429|secondary rate limit"
 gh() {
-  local out err rc delay
-  [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || rm -f "$PR_AUTOPILOT_TRANSIENT_FILE"
+  local out err rc delay re=$GH_TRANSIENT_RE write=0 a prev=""
+  for a in "$@"; do
+    case $prev$a in
+      -XPOST | -XPATCH | -XPUT | -XDELETE | -f* | -F* | --field* | --raw-field* | --method*) write=1 ;;
+    esac
+    prev=$a
+  done
+  case ${1:-} in pr) case ${2:-} in review | comment | create | edit | merge | close) write=1 ;; esac ;; esac
+  [ "$write" = 0 ] || re=$GH_REJECTED_RE
+  [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || rm -f "$PR_AUTOPILOT_TRANSIENT_FILE" # scoped to the last call
   out=$(mktemp) err=$(mktemp)
   # The trailing "" is the last try: no sleep after it.
   for delay in ${PR_AUTOPILOT_GH_RETRY:-2 5 10} ""; do
     command gh "$@" >"$out" 2>"$err"; rc=$?
     [ "$rc" -ne 0 ] || break
-    grep -qiE "$GH_TRANSIENT_RE" "$out" "$err" || break
+    grep -qiE "$re" "$out" "$err" || break
     if [ -z "$delay" ]; then
-      [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || : >"$PR_AUTOPILOT_TRANSIENT_FILE"
+      [ "$write" = 1 ] || [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || : >"$PR_AUTOPILOT_TRANSIENT_FILE"
       break
     fi
     sleep "$delay"

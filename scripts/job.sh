@@ -55,6 +55,11 @@ trap cleanup EXIT
 trap 'echo "stopped (pause or signal)" >>"$LOG"; log "job $repo#$n stopped, will rerun after resume"; exit 143' TERM INT
 abort_if_paused() { is_paused && { echo "paused, aborting before any write" >>"$LOG"; log "job $repo#$n aborted by pause"; exit 143; }; }
 
+# transient.tsv: "epoch<TAB>key" of runs not counted as an attempt (GitHub unreachable, claude limit).
+# Only the last 24h count toward the cap of 5, so it can neither loop forever nor linger.
+transient_count() { cat "$STATE_DIR/transient.tsv" 2>/dev/null | awk -F'\t' -v k="$DKEY" -v t="$(($(date +%s) - 86400))" '$2 == k && $1 > t {c++} END {print c + 0}'; }
+note_transient() { printf '%s\t%s\n' "$(date +%s)" "$DKEY" >>"$STATE_DIR/transient.tsv"; }
+
 fail_extra="" # what the owner must still see when a job fails late (escalation, records already made)
 fail() { # fail <message>: loud report; retried by the poller (max 3) unless we already wrote to GitHub
   local nf
@@ -63,10 +68,10 @@ fail() { # fail <message>: loud report; retried by the poller (max 3) unless we 
   if [ "$posted" = 1 ]; then
     echo "$DKEY" >>"$STATE_DIR/handled.tsv" # a repeat could double-post
     report "$prefix PARTLY DONE, then FAILED: $1. Not retried automatically, check the PR. Log: $LOG."
-  elif [ -e "$PR_AUTOPILOT_TRANSIENT_FILE" ] && [ "$(cat "$STATE_DIR/transient.tsv" 2>/dev/null | grep -cxF "$DKEY")" -lt 5 ]; then
+  elif [ -e "$PR_AUTOPILOT_TRANSIENT_FILE" ] && [ "$(transient_count)" -lt 5 ]; then
     # GitHub was unreachable even after gh()'s retries: not the PR's fault, so no attempt is burned and
     # the next poll starts over. At most 5 times per key, then it counts like any failure.
-    echo "$DKEY" >>"$STATE_DIR/transient.tsv"
+    note_transient
     log "$repo#$n: GitHub unreachable ($1), not counted as an attempt, retrying next poll"
   else
     printf '%s\t%s\n' "$(date +%s)" "$DKEY" >>"$STATE_DIR/failed.tsv"
@@ -104,6 +109,13 @@ check_head() { # PR still open, ready, and at the head we worked on
   [ "$cur" = "open false $head" ] || skip_quietly "PR changed while the job ran ($cur), nothing written"
 }
 gh_get() { gh api "$@" 2>>"$LOG"; }
+# own_comment <comments endpoint> <body>: the JSON of our own comment with exactly this body, if there is
+# one. After a POST that failed ambiguously (the server may have applied it) this tells "already there"
+# from "never arrived", so a retry cannot post twice.
+own_comment() {
+  gh_get --paginate "$1" | jq -s --arg me "$me" --arg b "$2" \
+    'def n: gsub("\r"; "") | sub("\\s+$"; ""); [add // [] | .[] | select(.user.login == $me and (.body | n) == ($b | n))] | first // empty'
+}
 
 # --- preflight
 me=$(gh api user --jq .login 2>>"$LOG"); [ -n "$me" ] || fail "gh api user failed (not logged in or offline)"
@@ -269,6 +281,7 @@ abort_if_paused
 total_cost=0
 # run_claude <prompt> <out.jsonl>: sets rc. Own process group so pause or the timeout kill all of it.
 run_claude() {
+  rm -f "$PR_AUTOPILOT_TRANSIENT_FILE" # a tolerated gh failure earlier must not excuse a claude failure
   set -m
   claude -p "$1" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
     --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
@@ -304,7 +317,10 @@ if [ -z "$skip_model" ]; then
   echo "stats: agent_calls=${agent_calls:-0} max_agents_in_one_message=${agent_parallel:-0} $(jq -r '"num_turns=\(.num_turns) duration_ms=\(.duration_ms) cost_usd=\(.total_cost_usd)"' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
   echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
   # A spent plan is not this PR's fault: no attempt burned, and the poller starts no jobs for 30 minutes.
-  if grep -q "hit your session limit" "$JOB/claude.jsonl" 2>/dev/null; then
+  # Only claude's own final error result counts: the phrase may sit in PR content in tool results.
+  if [ "$rc" -ne 0 ] && jq -e '.is_error == true and ((.result // "") | test("hit your session limit"))' "$JOB/claude.json" >/dev/null 2>&1 &&
+    [ "$(transient_count)" -lt 5 ]; then
+    note_transient
     echo "claude session limit reached, job not counted as an attempt" >>"$LOG"
     log "$repo#$n: claude session limit reached, pausing job starts for 30 minutes"
     touch "$STATE_DIR/claude_limited"
@@ -370,9 +386,14 @@ finish_review() {
   posted=1
   local resp rid got
   resp=$(gh api -X POST "repos/$repo/pulls/$n/reviews" -f commit_id="$head" -f event="$event" \
-    -F body=@"$JOB/body.safe.md" 2>>"$LOG") || fail "posting the review failed"
-  rid=$(jq -r '.id // empty' <<<"$resp")
-  [ -n "$rid" ] || fail "review post returned no id"
+    -F body=@"$JOB/body.safe.md" 2>>"$LOG")
+  rid=$(jq -r '.id // empty' <<<"$resp" 2>/dev/null)
+  if [ -z "$rid" ]; then # ambiguous failure: did the review land anyway?
+    rid=$(gh_get --paginate "repos/$repo/pulls/$n/reviews" | jq -rs --arg me "$me" --arg h "$head" --arg s "$state" \
+      '[add // [] | .[] | select(.user.login == $me and .commit_id == $h and .state == $s)] | last | .id // empty')
+    [ -z "$rid" ] || echo "review POST failed but the review is on GitHub ($rid), not re-sending" >>"$LOG"
+  fi
+  [ -n "$rid" ] || fail "posting the review failed"
   got=$(gh_get "repos/$repo/pulls/$n/reviews/$rid" --jq '[.user.login, .commit_id, .state] | join(" ")') ||
     fail "could not read the review back"
   [ "$got" = "$me $head $state" ] || fail "review read back as '$got', expected '$me $head $state'"
@@ -555,7 +576,7 @@ finish_fix() {
       fail "edited the PR description but GitHub does not show the new text"
   fi
   # Deferrals: recorded where they will be seen, each linking back here, before any reply links them.
-  local links='[]' di dbody dpr link esc_saved=$fail_extra
+  local links='[]' di dbody dpr dtitle link esc_saved=$fail_extra
   for ((di = 0; di < ndefer; di++)); do
     dbody="$(jq -r ".deferrals[$di].body" "$r" | defang)
 
@@ -564,9 +585,12 @@ Deferred from the review of #$n: $url"
     posted=1
     if [ -n "$dpr" ]; then
       link=$(gh api "repos/$repo/issues/$dpr/comments" -f body="$dbody" --jq '.html_url // empty' 2>>"$LOG")
+      [ -n "$link" ] || link=$(own_comment "repos/$repo/issues/$dpr/comments" "$dbody" | jq -r '.html_url // empty')
     else
-      link=$(gh api "repos/$repo/issues" -f title="$(jq -r ".deferrals[$di].issue_title" "$r" | defang)" \
-        -f body="$dbody" --jq '.html_url // empty' 2>>"$LOG")
+      dtitle=$(jq -r ".deferrals[$di].issue_title" "$r" | defang)
+      link=$(gh api "repos/$repo/issues" -f title="$dtitle" -f body="$dbody" --jq '.html_url // empty' 2>>"$LOG")
+      [ -n "$link" ] || link=$(gh_get --paginate "repos/$repo/issues?creator=$me&state=open&per_page=100" | jq -rs --arg t "$dtitle" --arg b "$dbody" \
+        'def n: gsub("\r"; "") | sub("\\s+$"; ""); [add // [] | .[] | select(.title == $t and (.body // "" | n) == ($b | n))] | first | .html_url // empty')
     fi
     [ -n "$link" ] || fail "recording deferral $di failed, no reply was posted"
     links=$(jq -c --arg l "$link" '. + [$l]' <<<"$links")
@@ -581,6 +605,10 @@ Deferred from the review of #$n: $url"
     posted=1
     if [ -n "$id" ]; then resp=$(gh api "repos/$repo/pulls/$n/comments/$id/replies" -f body="$body" 2>>"$LOG")
     else resp=$(gh api "repos/$repo/issues/$n/comments" -f body="$body" 2>>"$LOG"); fi
+    if [ -z "$(jq -r '.id // empty' <<<"$resp" 2>/dev/null)" ]; then # ambiguous failure: already there?
+      if [ -n "$id" ]; then resp=$(own_comment "repos/$repo/pulls/$n/comments" "$body")
+      else resp=$(own_comment "repos/$repo/issues/$n/comments" "$body"); fi
+    fi
     if [ -n "$(jq -r '.id // empty' <<<"$resp" 2>/dev/null)" ]; then nposted=$((nposted + 1))
     else errs="$errs reply $((idx + 1)) failed;"; fi
   done

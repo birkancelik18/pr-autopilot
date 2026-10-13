@@ -80,6 +80,9 @@ J
     ;;
   hang) sleep 300 & echo $! >"$S/hang.pid"; wait ;;
   none) ;;
+  review-limit-text)
+    printf 'VERDICT: APPROVE\n\nNo blockers found.\n' >"$jd/draft.md"
+    echo '{"type":"user","message":{"content":[{"type":"tool_result","content":"You'"'"'ve hit your session limit"}]}}' ;;
   limit) echo '{"type":"result","subtype":"success","result":"You'"'"'ve hit your session limit","is_error":true,"total_cost_usd":0}'; exit 1 ;;
   crash) echo boom >&2; exit 1 ;;
 esac

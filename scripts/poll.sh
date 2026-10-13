@@ -168,9 +168,12 @@ process_item() {
     --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
     --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
-  # What failed.tsv pruning below may keep for this PR: only the keys of its current state.
-  echo "$mode|$(tr A-Z a-z <<<"$repo")|$n" >>"$tmp/evaluated"
-  jq -r --arg m "$mode" '$m + "|" + .key, ((.steps // [])[] | $m + "|" + .key)' <<<"$ev" >>"$tmp/curkeys"
+  # What failed.tsv pruning below may keep for this PR: only the keys of its current state. A skip
+  # (draft, nothing to address) says nothing about a failure, except closed or merged.
+  if [ -z "$(jq -r '.skip // ""' <<<"$ev")" ] || [ "$(jq -r .skip <<<"$ev")" = "closed or merged" ]; then
+    echo "$mode|$(tr A-Z a-z <<<"$repo")|$n" >>"$tmp/evaluated"
+    jq -r --arg m "$mode" '$m + "|" + .key, ((.steps // [])[] | $m + "|" + .key)' <<<"$ev" >>"$tmp/curkeys"
+  fi
   [ "$(jq -r .untrusted <<<"$ev")" = 0 ] ||
     log "$repo#$n: ignoring $(jq -r .untrusted <<<"$ev") comment(s)/review(s) from untrusted authors (not owner/member/collaborator, not in trusted_commenters)"
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
@@ -224,18 +227,22 @@ while IFS= read -r item; do
   is_paused && { log "paused mid-poll, not starting more jobs"; break; }
   process_item "$item" || true
 done <"$tmp/items"
-# Prune failed.tsv so it lists only active failures: drop entries older than FAIL_KEEP, of PRs that are
-# no longer open/listed, and of keys whose PR was evaluated this poll without that key being current
-# (new head, new review round, resolved). Skipped when a job runs: it may append to the file.
+# Prune failed.tsv so it lists only active failures: drop entries older than FAIL_KEEP, and entries of a
+# PR evaluated this poll whose key is not current (new head, new review round, resolved) or that closed.
+# A PR merely absent from this poll's list keeps its entries, or a flaky search would reset the 3-attempt cap. Skipped when a job runs: it may append to the file.
 if [ -s "$FAILED" ] && [ "$(running)" -eq 0 ]; then
-  jq -r '"\(.repo | ascii_downcase)|\(.number)"' "$tmp/items" >"$tmp/items.keys"
   touch "$tmp/evaluated" "$tmp/curkeys"
   # Keys go in via files: BSD awk rejects newlines in -v values.
-  awk -F'\t' -v now="$(date +%s)" -v keep="$FAIL_KEEP" -v fi="$tmp/items.keys" -v fe="$tmp/evaluated" -v fc="$tmp/curkeys" '
+  awk -F'\t' -v now="$(date +%s)" -v keep="$FAIL_KEEP" -v fe="$tmp/evaluated" -v fc="$tmp/curkeys" '
     function load(file, arr,   l) { while ((getline l < file) > 0) arr[l] = 1; close(file) }
-    BEGIN { load(fi, it); load(fe, evd); load(fc, ck) }
+    BEGIN { load(fe, evd); load(fc, ck) }
     { split($2, f, "|"); pr = tolower(f[3]) "|" f[4]
-      if (now - $1 > keep || !(pr in it) || ((f[1] "|" pr) in evd && !($2 in ck))) next
+      if (now - $1 > keep || ((f[1] "|" pr) in evd && !($2 in ck))) next
       print }' "$FAILED" >"$tmp/failed.new" && cat "$tmp/failed.new" >"$FAILED"
+fi
+# transient.tsv (runs not counted as attempts) only matters for a day.
+if [ -s "$STATE_DIR/transient.tsv" ] && [ "$(running)" -eq 0 ]; then
+  awk -F'\t' -v t="$(($(date +%s) - 86400))" '$1 > t' "$STATE_DIR/transient.tsv" >"$tmp/transient.new" &&
+    cat "$tmp/transient.new" >"$STATE_DIR/transient.tsv"
 fi
 log "poll done ($(wc -l <"$tmp/items" | tr -d ' ') items)"
