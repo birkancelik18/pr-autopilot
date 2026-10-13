@@ -234,6 +234,15 @@ check "job proceeds and succeeds" 1 "$(grep -c "dry|review|acme/app|11|$SHA" "$S
 check "model input has the per-file patch (second page too)" 1 "$(grep -c '^+y$' "$jd/diff.patch")"
 check "a file without a patch is listed with a pointer to the checkout" 1 "$(grep -A2 '^diff --git a/src/big.txt' "$jd/diff.patch" | grep -c 'patch too large.*checkout')"
 check "log records the fallback path" 1 "$(grep -c '^diff: per-file patches from the files API (2 files, 1 without a patch)' "$S/logs/"*review.log)"
+cat >"$FIX/files-11.json" <<'J'
+[{"filename":"src/a.txt","status":"modified","patch":"@@ -1 +1,2 @@\n x\n+y"},{"filename":"src/e\nvil\r.txt","status":"added","patch":"@@ -0,0 +1 @@\n+z"}]
+J
+jq '.changed_files = 3001' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"
+reset; ev review true; FAKE_DIFF_TOO_LARGE=1 FAKE_CLAUDE=review job
+jd=$(cat "$S/claude.jobdir")
+check "fewer files than changed_files: loud warning at the top of diff.patch and in the log" "1 1" "$(head -1 "$jd/diff.patch" | grep -c 'WARNING: PARTIAL DIFF.*2 of 3001') $(grep -c '^WARNING: partial diff, 2 of 3001' "$S/logs/"*review.log)"
+check "newline and CR in a filename cannot fake diff lines" "2 1" "$(grep -c '^diff --git' "$jd/diff.patch") $(grep -c '^diff --git a/src/e vil .txt b/src/e vil .txt$' "$jd/diff.patch")"
+jq 'del(.changed_files)' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"
 reset; ev review true; FAKE_CLAUDE=review job
 check "small PR keeps the single-call path" 1 "$(grep -c '^diff: single call (gh pr diff)' "$S/logs/"*review.log)"
 echo "-- review: the user's own review skills add one parallel pass each"

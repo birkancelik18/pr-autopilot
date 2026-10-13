@@ -124,12 +124,21 @@ else
   # GitHub refuses a whole-PR diff past 20000 lines (HTTP 406); the per-file API has no such cap,
   # but omits `patch` for files that are individually too large.
   echo "diff: single call failed, falling back to the paginated files API" >>"$LOG"
-  gh api --paginate "repos/$repo/pulls/$n/files" 2>>"$LOG" | jq -rs 'add // [] | .[] |
-    "diff --git a/\(.previous_filename // .filename) b/\(.filename)\n# status: \(.status)\n" +
-    (if .patch then "--- a/\(.previous_filename // .filename)\n+++ b/\(.filename)\n\(.patch)" else "(patch too large or binary, read the file in the checkout)" end) + "\n"' \
+  # A filename may hold newlines or other control chars; unescaped they would fake extra diff lines.
+  gh api --paginate "repos/$repo/pulls/$n/files" 2>>"$LOG" | jq -rs 'def c: gsub("[\u0000-\u001f]"; " ");
+    add // [] | .[] | (.filename | c) as $f | ((.previous_filename // .filename) | c) as $p |
+    "diff --git a/\($p) b/\($f)\n# status: \(.status)\n" +
+    (if .patch then "--- a/\($p)\n+++ b/\($f)\n\(.patch)" else "(patch too large or binary, read the file in the checkout)" end) + "\n"' \
     >"$JOB/diff.patch" || fail "fetch diff failed"
   [ -s "$JOB/diff.patch" ] || fail "fetch diff failed (files API returned nothing)"
   echo "diff: per-file patches from the files API ($(grep -c '^diff --git' "$JOB/diff.patch") files, $(grep -c '^(patch too large' "$JOB/diff.patch") without a patch)" >>"$LOG"
+  # The files API stops at 3000 files; a short list means the model would review a partial diff unknowingly.
+  nfiles=$(grep -c '^diff --git' "$JOB/diff.patch"); nchanged=$(jq -r '.changed_files // 0' "$JOB/pr.json")
+  if [ "$nfiles" -lt "$nchanged" ]; then
+    warn="# WARNING: PARTIAL DIFF. The files API returned $nfiles of $nchanged changed files (it caps at 3000). Files missing below are NOT shown; read them from the checkout (git diff against the base)."
+    echo "WARNING: partial diff, $nfiles of $nchanged changed files" >>"$LOG"
+    { echo "$warn"; cat "$JOB/diff.patch"; } >"$JOB/diff.patch.tmp" && mv "$JOB/diff.patch.tmp" "$JOB/diff.patch"
+  fi
 fi
 for ep in reviews comments issue-comments; do
   case $ep in
