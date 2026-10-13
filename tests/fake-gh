@@ -4,7 +4,9 @@
 S=$PR_AUTOPILOT_STATE/fake; mkdir -p "$S"
 W=$PR_AUTOPILOT_STATE/writes.log
 args=("$@"); ep="" expr="" method=GET fields=() reviewers=() event="" commit_id=""
-if [ "${1:-}" = pr ] && [ "${2:-}" = diff ]; then cat "$FIX/diff.patch"; exit 0; fi
+if [ "${1:-}" = pr ] && [ "${2:-}" = diff ]; then
+  [ -n "${FAKE_DIFF_TOO_LARGE:-}" ] && { echo "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)" >&2; exit 1; }
+  cat "$FIX/diff.patch"; exit 0; fi
 i=0
 while [ $i -lt ${#args[@]} ]; do
   a=${args[$i]}
@@ -44,6 +46,7 @@ case "$method $ep" in
     jq -n --arg c "$commit_id" --arg s "$state" '{id: 777, user: {login: "me"}, commit_id: $c, state: $s}' >"$S/new"
     jq -s 'add' <(cat "$S/posted-reviews.json" 2>/dev/null || echo '[]') <(jq -s . "$S/new") >"$S/p.tmp" && mv "$S/p.tmp" "$S/posted-reviews.json"
     cat "$S/new" ;;
+  "GET repos/"*/pulls/*/files) cat "$FIX/files-$(num "$ep").json" ;;
   "GET repos/"*/pulls/*/comments) cat "$FIX/comments-$(num "$ep").json" 2>/dev/null || echo '[]' ;;
   "POST repos/"*/pulls/*/comments/*/replies) echo "POST $ep ${fields[*]}" >>"$W"; echo '{"id": 888}' ;;
   "GET repos/"*/issues/*/comments) cat "$FIX/issue-$(num "$ep").json" 2>/dev/null || echo '[]' ;;

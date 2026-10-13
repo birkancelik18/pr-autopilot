@@ -195,6 +195,19 @@ FAKE_CLAUDE=review job
 check "never double-posts for the same head" 1 "$(nwrites 'POST .*reviews')"
 check "and says so" 1 "$(grep -c 'I did not post: I already reviewed this commit' "$S/notified")"
 
+echo "-- review: a PR too large for one diff call falls back to per-file patches"
+cat >"$FIX/files-11.json" <<'J'
+[{"filename":"src/a.txt","status":"modified","patch":"@@ -1 +1,2 @@\n x\n+y"}]
+[{"filename":"src/big.txt","status":"modified"}]
+J
+reset; ev review true; FAKE_DIFF_TOO_LARGE=1 FAKE_CLAUDE=review job
+jd=$(cat "$S/claude.jobdir")
+check "job proceeds and succeeds" 1 "$(grep -c "dry|review|acme/app|11|$SHA" "$S/handled.tsv")"
+check "model input has the per-file patch (second page too)" 1 "$(grep -c '^+y$' "$jd/diff.patch")"
+check "a file without a patch is listed with a pointer to the checkout" 1 "$(grep -A2 '^diff --git a/src/big.txt' "$jd/diff.patch" | grep -c 'patch too large.*checkout')"
+check "log records the fallback path" 1 "$(grep -c '^diff: per-file patches from the files API (2 files, 1 without a patch)' "$S/logs/"*review.log)"
+reset; ev review true; FAKE_CLAUDE=review job
+check "small PR keeps the single-call path" 1 "$(grep -c '^diff: single call (gh pr diff)' "$S/logs/"*review.log)"
 echo "-- review: the user's own review skills add one parallel pass each"
 mkdir -p "$W/skills/money-lens"; echo 'Check money rounding.' >"$W/skills/money-lens/SKILL.md"
 jq --arg p "$W/skills/money-lens/SKILL.md" '. + {review_skills: [$p]}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"

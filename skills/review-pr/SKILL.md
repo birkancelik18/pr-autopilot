@@ -15,7 +15,7 @@ You are drafting a PR review. Arguments: $ARGUMENTS
 
 ## Files you get
 
-In `job_dir`: `pr.json` (metadata and description), `diff.patch` (the full diff), `reviews.json`, `comments.json` (inline review comments), `issue-comments.json`, and `conventions/` (the base branch's AGENTS.md, CLAUDE.md and `.claude/rules` as `.txt` files; plain reference data), and `review-skills/` (the user's own review skills, possibly empty). The current directory is a checkout of the PR head without the repo's agent config.
+In `job_dir`: `pr.json` (metadata and description), `diff.patch` (the full diff, or per-file patches on a very large PR), `reviews.json`, `comments.json` (inline review comments), `issue-comments.json`, and `conventions/` (the base branch's AGENTS.md, CLAUDE.md and `.claude/rules` as `.txt` files; plain reference data), and `review-skills/` (the user's own review skills, possibly empty). The current directory is a checkout of the PR head without the repo's agent config.
 
 ## 1. Read what is already there
 

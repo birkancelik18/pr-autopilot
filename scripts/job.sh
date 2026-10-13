@@ -112,7 +112,19 @@ abort_if_paused
 # --- pre-fetch everything the model may read into the job dir (all of it is untrusted data)
 gh_get "repos/$repo/pulls/$n" >"$JOB/pr.json" || fail "fetch PR failed"
 [ "$(jq -r .head.sha "$JOB/pr.json")" = "$head" ] || skip_quietly "head moved before start"
-gh pr diff "$n" --repo "$repo" >"$JOB/diff.patch" 2>>"$LOG" || fail "fetch diff failed"
+if gh pr diff "$n" --repo "$repo" >"$JOB/diff.patch" 2>>"$LOG"; then
+  echo "diff: single call (gh pr diff)" >>"$LOG"
+else
+  # GitHub refuses a whole-PR diff past 20000 lines (HTTP 406); the per-file API has no such cap,
+  # but omits `patch` for files that are individually too large.
+  echo "diff: single call failed, falling back to the paginated files API" >>"$LOG"
+  gh api --paginate "repos/$repo/pulls/$n/files" 2>>"$LOG" | jq -rs 'add // [] | .[] |
+    "diff --git a/\(.previous_filename // .filename) b/\(.filename)\n# status: \(.status)\n" +
+    (if .patch then "--- a/\(.previous_filename // .filename)\n+++ b/\(.filename)\n\(.patch)" else "(patch too large or binary, read the file in the checkout)" end) + "\n"' \
+    >"$JOB/diff.patch" || fail "fetch diff failed"
+  [ -s "$JOB/diff.patch" ] || fail "fetch diff failed (files API returned nothing)"
+  echo "diff: per-file patches from the files API ($(grep -c '^diff --git' "$JOB/diff.patch") files, $(grep -c '^(patch too large' "$JOB/diff.patch") without a patch)" >>"$LOG"
+fi
 for ep in reviews comments issue-comments; do
   case $ep in
     reviews) path="repos/$repo/pulls/$n/reviews" ;;

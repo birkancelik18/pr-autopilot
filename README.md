@@ -113,6 +113,7 @@ Remaining risks: a prompt injection can still skew a review's wording or verdict
 - The machine must be awake and online. A PR that needs you is picked up at the next poll after wake.
 - Search API limit is 30 requests a minute; the poller makes two per poll. A PR whose `updated_at` did not change since it was last settled is not re-fetched.
 - Review dedupe is per (PR, head commit): a re-request on an unchanged head does not trigger a second review.
+- A PR whose diff GitHub refuses as one call (over 20000 lines) is read per file from the files API; a file too large for GitHub to give a patch is listed as such and the model reads it in the checkout. The job log says which path was used.
 - Job logs are kept 14 days, `polls.log` is trimmed at 1 MB.
 - A review draft over 150 words is not thrown away: one cheap follow-up turn asks Claude to shorten it without dropping a blocker, and only a draft still over the limit fails.
 - It uses your own Claude usage. Each review (three parallel subagent passes plus the blend) costs roughly what a long interactive Claude Code session does, and the job log records `usage: total_cost_usd=...` per job. Three review passes plus subagents is not free; lower `max_parallel` or pause when needed.
