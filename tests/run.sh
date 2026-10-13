@@ -64,7 +64,7 @@ check "carol's later APPROVED overrides her CHANGES_REQUESTED (no r id)" 0 "$(gr
 
 echo "== poller: failures retry at most 3 times with backoff"
 jq '.head.sha = "iii000"' "$FIX/pr-19.json" >"$W/x" && mv "$W/x" "$FIX/pr-19.json"; bump 19
-age() { awk -F'\t' 'BEGIN{OFS="\t"} {$1 = 1; print}' "$S/failed.tsv" >"$W/f" && mv "$W/f" "$S/failed.tsv"; }
+age() { awk -F'\t' -v t=$(($(date +%s) - 400)) 'BEGIN{OFS="\t"} {$1 = t; print}' "$S/failed.tsv" >"$W/f" && mv "$W/f" "$S/failed.tsv"; }
 before=$(jobs_n)
 FAKE_JOB_FAIL=1 poll; check "failing job ran once" $((before + 1)) "$(jobs_n)"
 poll; check "recent failure: backing off" $((before + 1)) "$(jobs_n)"
@@ -72,11 +72,15 @@ age; FAKE_JOB_FAIL=1 poll; age; FAKE_JOB_FAIL=1 poll
 check "retried after backoff, attempts 2 and 3" $((before + 3)) "$(jobs_n)"
 age; poll; check "after 3 failures it gives up" $((before + 3)) "$(jobs_n)"
 check "give-up is logged" 1 "$([ "$(plog 'gave up on')" -ge 1 ] && echo 1 || echo 0)"
+g=$(plog 'gave up on'); poll; poll
+check "give-up is logged once per PR update, not every poll" "$g" "$(plog 'gave up on')"
 
 echo "== poller: going live does not replay the backlog"
 before=$(jobs_n)
 mkcfg false; poll
 check "switch to live: older unread notifications are skipped" "$before" "$(jobs_n)"
+p=$(plog 'predates going live'); poll
+check "a PR that predates going live is logged once, not every poll" "$p" "$(plog 'predates going live')"
 check "live_since recorded" 1 "$([ -s "$S/live_since" ] && echo 1 || echo 0)"
 bump 11 2999-01-01T00:00:00Z
 poll; check "a notification updated after going live runs" $((before + 1)) "$(jobs_n)"
@@ -124,6 +128,30 @@ printf 'dry|cifix|acme/app|12|old1\ndry|cifix|acme/app|12|old2\n' >>"$S/handled.
 jq '.head.sha = "ccc999"' "$FIX/pr-12.json" >"$W/x" && mv "$W/x" "$FIX/pr-12.json"; bump 12; rm -f "$S/notified"
 n5=$(grep -c '"cifix","acme/app",12' "$S/jobs.log"); FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll; bump 12; FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll
 check "after 3 CI fixes: no 4th CI job for #12, the user is told once" "$n5 1" "$(grep -c '"cifix","acme/app",12' "$S/jobs.log") $(grep -c 'PR #12 .*CI is still failing after 3 fix attempts' "$S/notified")"
+echo "== poller: network blips are quiet, failed.tsv only lists active failures"
+mkcfg true; rm -f "$S/notified" "$S/last_error_report" "$S/poll_failures"
+for i in 1 2 3 4; do FAKE_GH_FAIL="GET user" poll >/dev/null 2>&1; done
+check "4 polls in a row without gh api user: nothing reported, only logged" "0 4" "$(cat "$S/notified" 2>/dev/null | grep -c 'returned nothing') $(cat "$S/poll_failures")"
+FAKE_GH_FAIL="GET user" poll >/dev/null 2>&1
+check "the 5th consecutive failure is reported" 1 "$(grep -c 'returned nothing.*(5 polls in a row)' "$S/notified")"
+rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 poll >/dev/null 2>&1
+check "two transient errors inside one poll are retried: it succeeds and the failure counter resets" "0" "$(cat "$S/poll_failures")"
+rm -f "$S/notified" "$S/last_error_report" "$S/poll_failures"
+FAKE_GH_FAIL="GET user" poll >/dev/null 2>&1; poll >/dev/null 2>&1
+check "one failed poll followed by a good one: the counter is back to 0" 0 "$(cat "$S/poll_failures")"
+: >"$S/seen.tsv"; bump 12; now=$(date +%s)
+printf '1\tdry|cifix|acme/app|12|ccc999\n%s\tdry|cifix|acme/app|12|oldhead\n%s\tdry|review|acme/app|999|x\n%s\tdry|cifix|acme/app|12|ccc999\n' "$now" "$now" "$now" >"$S/failed.tsv"
+FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll
+check "failed.tsv keeps only the recent failure of the PR's current key" "$now	dry|cifix|acme/app|12|ccc999" "$(cat "$S/failed.tsv")"
+printf '%s\tdry|cifix|acme/app|12|ccc999\n' "$now" >"$S/failed.tsv"; bash "$T/../scripts/ctl.sh" status >"$W/status.txt"
+check "status lists it once, as an active failure" 1 "$(grep -c '^  1x dry|cifix|acme/app|12|ccc999$' "$W/status.txt")"
+
+echo "== poller: no jobs start while the claude session limit is active"
+mkcfg true; : >"$S/seen.tsv"; : >"$S/handled.tsv"; : >"$S/failed.tsv"; n0=$(jobs_n); touch "$S/claude_limited"; poll
+check "limit hit just now: no job starts" "$n0" "$(jobs_n)"
+rm -f "$S/claude_limited"; : >"$S/seen.tsv"; poll
+check "limit gone: jobs start again" 1 "$([ "$(jobs_n)" -gt "$n0" ] && echo 1 || echo 0)"
+
 echo "== scheduler files keep jobs alive after poll.sh exits"
 plist=$(bash "$T/../scripts/install-scheduler.sh" print-plist); unit=$(bash "$T/../scripts/install-scheduler.sh" print-unit)
 check "launchd plist has AbandonProcessGroup=true" 1 "$(grep -c '<key>AbandonProcessGroup</key><true/>' <<<"$plist")"

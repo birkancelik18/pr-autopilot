@@ -46,7 +46,8 @@ case ${1:-} in
     ls -t "$STATE_DIR/logs"/*.log 2>/dev/null | head -8 | while read -r l; do
       echo "  $(basename "$l")$(grep -q '^FAILED' "$l" && echo '   <-- FAILED')"
     done
-    echo; echo "Failed attempts (epoch, key):"; tail -5 "$STATE_DIR/failed.tsv" 2>/dev/null
+    echo; echo "Active failures (the poller drops a failure once its PR moved on, closed, or after 7 days):"
+    awk -F'\t' '{c[$2]++} END {for (k in c) print "  " c[k] "x " k}' "$STATE_DIR/failed.tsv" 2>/dev/null
     echo; echo "Recent reports and failures:"
     grep 'REPORT' "$STATE_DIR/polls.log" 2>/dev/null | tail -8
     ;;

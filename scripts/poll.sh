@@ -7,7 +7,7 @@ set -uo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/lib.sh"
 JOB=${PR_AUTOPILOT_JOB:-$DIR/job.sh}
-MAX_ATTEMPTS=3 RETRY_AFTER=300 MAX_CI_FIXES=3
+MAX_ATTEMPTS=3 RETRY_AFTER=300 MAX_CI_FIXES=3 POLL_FAIL_REPORT=5 FAIL_KEEP=$((7 * 86400))
 
 is_paused && { log "paused"; exit 0; }
 [ -f "$CONFIG" ] || { log "no config at $CONFIG, run /pr-autopilot:setup"; exit 0; }
@@ -35,8 +35,18 @@ touch "$HANDLED" "$FAILED" "$SEEN"
 [ "$(wc -l <"$SEEN")" -gt 5000 ] && : >"$SEEN"
 gc
 
+# A poll-level failure is usually a network blip (gh() already retried): stay quiet, and tell the user
+# only when POLL_FAIL_REPORT polls in a row failed.
+poll_fail() { # poll_fail <message>
+  local n; n=$(($(cat "$STATE_DIR/poll_failures" 2>/dev/null || echo 0) + 1))
+  echo "$n" >"$STATE_DIR/poll_failures"
+  if [ "$n" -ge "$POLL_FAIL_REPORT" ]; then report_throttled "$1 ($n polls in a row)"
+  else log "WARN $1 (poll $n of $POLL_FAIL_REPORT, not reported yet)"; fi
+  exit 1
+}
+
 me=$(gh api user --jq .login 2>>"$STATE_DIR/polls.log")
-[ -n "$me" ] || { report_throttled "poll failed: gh api user returned nothing. Is gh logged in and online?"; exit 1; }
+[ -n "$me" ] || poll_fail "poll failed: gh api user returned nothing. Is gh logged in and online?"
 # Fail closed: live only when dry_run is exactly false; anything else (missing, null, "false") is dry.
 dry=$(jq -r 'if .dry_run == false then "false" else "true" end' "$CONFIG"); mode=live; [ "$dry" = true ] && mode=dry
 max=$(cfgd max_parallel 2)
@@ -75,7 +85,8 @@ search() { # search <qualifier> <reason>: all pages, over each repo chunk (query
 }
 {
   search "review-requested:$me" review_requested && search "author:$me" author
-} >"$tmp/search" || { report_throttled "poll failed: GitHub search failed (see $STATE_DIR/polls.log)"; exit 1; }
+} >"$tmp/search" || poll_fail "poll failed: GitHub search failed (see $STATE_DIR/polls.log)"
+echo 0 >"$STATE_DIR/poll_failures"
 if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE_DIR/polls.log" |
   jq -s -c --slurpfile c "$CONFIG" '
     ($c[0].repos | with_entries(.key |= ascii_downcase)) as $r
@@ -127,16 +138,21 @@ settled() {
     $1 == k && $2 == u && (own != "author" || now - ($3 + 0) < age) {found = 1} END {exit !found}' "$SEEN"
 }
 
+# job.sh touches claude_limited when claude reports a spent session limit.
+limited=""
+if [ -n "$(find "$STATE_DIR/claude_limited" -mmin -30 2>/dev/null)" ]; then
+  limited=1; log "claude session limit hit less than 30 minutes ago, not starting jobs"
+fi
+
 process_item() {
   local item=$1 repo n reason ev key file thread
   repo=$(jq -r .repo <<<"$item") n=$(jq -r .number <<<"$item") reason=$(jq -r .reason <<<"$item")
-  if [ "$mode" = live ] && [[ "$(jq -r .updated_at <<<"$item")" < "$live_since" || \
-    "$(jq -r .updated_at <<<"$item")" == "$live_since" ]]; then
-    log "skip $repo#$n: predates going live (use /pr-autopilot:replay to include it)"; return 0
-  fi
   local seen_key="$mode|$repo#$n" updated
   updated=$(jq -r .updated_at <<<"$item")
   if settled "$reason"; then return 0; fi # nothing new since we last settled it
+  if [ "$mode" = live ] && [[ "$updated" < "$live_since" || "$updated" == "$live_since" ]]; then
+    log "skip $repo#$n: predates going live (use /pr-autopilot:replay to include it)"; settle; return 0
+  fi
   fetch "repos/$repo/pulls/$n" "$tmp/pr" &&
     fetch "repos/$repo/pulls/$n/reviews" "$tmp/reviews" paginated &&
     fetch "repos/$repo/pulls/$n/comments" "$tmp/comments" paginated &&
@@ -152,6 +168,9 @@ process_item() {
     --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
     --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
+  # What failed.tsv pruning below may keep for this PR: only the keys of its current state.
+  echo "$mode|$(tr A-Z a-z <<<"$repo")|$n" >>"$tmp/evaluated"
+  jq -r --arg m "$mode" '$m + "|" + .key, ((.steps // [])[] | $m + "|" + .key)' <<<"$ev" >>"$tmp/curkeys"
   [ "$(jq -r .untrusted <<<"$ev")" = 0 ] ||
     log "$repo#$n: ignoring $(jq -r .untrusted <<<"$ev") comment(s)/review(s) from untrusted authors (not owner/member/collaborator, not in trusted_commenters)"
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
@@ -185,10 +204,11 @@ PR #$n ($(jq -r .title <<<"$ev")): CI is still failing after $MAX_CI_FIXES fix a
   local nfail last
   nfail=$(awk -F'\t' -v k="$key" '$2 == k' "$FAILED" | wc -l | tr -d ' ')
   last=$(awk -F'\t' -v k="$key" '$2 == k {t = $1} END {print t + 0}' "$FAILED")
-  if [ "$nfail" -ge "$MAX_ATTEMPTS" ]; then log "gave up on $key after $nfail failures"; return 0; fi
+  if [ "$nfail" -ge "$MAX_ATTEMPTS" ]; then log "gave up on $key after $nfail failures"; settle; return 0; fi
   if [ "$nfail" -gt 0 ] && [ $(($(date +%s) - last)) -lt "$RETRY_AFTER" ]; then
     log "backing off $key ($nfail failures)"; return 0
   fi
+  if [ -n "$limited" ]; then return 0; fi
   if [ "$(running)" -ge "$max" ]; then log "at max_parallel=$max, deferring $repo#$n"; return 0; fi
 
   file="$STATE_DIR/events/$(date +%Y%m%dT%H%M%S)-${repo//\//_}-$n.json"
@@ -204,4 +224,18 @@ while IFS= read -r item; do
   is_paused && { log "paused mid-poll, not starting more jobs"; break; }
   process_item "$item" || true
 done <"$tmp/items"
+# Prune failed.tsv so it lists only active failures: drop entries older than FAIL_KEEP, of PRs that are
+# no longer open/listed, and of keys whose PR was evaluated this poll without that key being current
+# (new head, new review round, resolved). Skipped when a job runs: it may append to the file.
+if [ -s "$FAILED" ] && [ "$(running)" -eq 0 ]; then
+  jq -r '"\(.repo | ascii_downcase)|\(.number)"' "$tmp/items" >"$tmp/items.keys"
+  touch "$tmp/evaluated" "$tmp/curkeys"
+  # Keys go in via files: BSD awk rejects newlines in -v values.
+  awk -F'\t' -v now="$(date +%s)" -v keep="$FAIL_KEEP" -v fi="$tmp/items.keys" -v fe="$tmp/evaluated" -v fc="$tmp/curkeys" '
+    function load(file, arr,   l) { while ((getline l < file) > 0) arr[l] = 1; close(file) }
+    BEGIN { load(fi, it); load(fe, evd); load(fc, ck) }
+    { split($2, f, "|"); pr = tolower(f[3]) "|" f[4]
+      if (now - $1 > keep || !(pr in it) || ((f[1] "|" pr) in evd && !($2 in ck))) next
+      print }' "$FAILED" >"$tmp/failed.new" && cat "$tmp/failed.new" >"$FAILED"
+fi
 log "poll done ($(wc -l <"$tmp/items" | tr -d ' ') items)"
