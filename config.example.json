@@ -9,6 +9,8 @@
   "ignore_authors": [],
   "max_parallel": 2,
   "job_timeout_minutes": 30,
+  "stall_minutes": 8,
+  "gh_timeout_seconds": 60,
   "slack_webhook": "",
   "trusted_commenters": [],
   "auto_approve_outsiders": false,

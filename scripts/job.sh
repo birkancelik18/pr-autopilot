@@ -166,7 +166,7 @@ for ep in reviews comments issue-comments; do
 done
 
 # --- checkout of the PR head without the repo's agent config (it is untrusted)
-git -C "$clone" fetch -q origin "+pull/$n/head:$REF" "+refs/heads/$base:$BASEREF" >>"$LOG" 2>&1 ||
+git_net -C "$clone" fetch -q origin "+pull/$n/head:$REF" "+refs/heads/$base:$BASEREF" >>"$LOG" 2>&1 ||
   fail "git fetch of PR head/base failed"
 [ "$(git -C "$clone" rev-parse "$REF")" = "$head" ] || skip_quietly "head moved before checkout"
 git -C "$clone" worktree add -q --detach --no-checkout "$WT" "$head" >>"$LOG" 2>&1 || fail "git worktree add failed"
@@ -282,6 +282,7 @@ join() { local IFS=,; echo "$*"; }
 
 prompt="/pr-autopilot:$skill job_dir=$JOB me=$me"
 tmo=$(cfgd job_timeout_minutes 30)
+stall_s=${PR_AUTOPILOT_STALL_SECONDS:-$(($(cfgd stall_minutes 8) * 60))} # env: tests only
 cd "$WT" || fail "cannot enter worktree"
 abort_if_paused
 total_cost=0
@@ -295,10 +296,31 @@ run_claude() {
     --output-format stream-json --verbose --no-session-persistence </dev/null >"$2" 2>>"$LOG" &
   cpid=$!
   set +m
-  (sleep $((tmo * 60)); echo "timeout after ${tmo}m" >>"$LOG"; kill -TERM -- "-$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null) 2>/dev/null &
+  # Watchdog: the outer cap (job_timeout_minutes), and no progress: claude's stream has not grown for
+  # stall_s seconds (an outage stalls its API calls with no error, 2026-10-14).
+  rm -f "$JOB/stalled"
+  (
+    start=$SECONDS since=$SECONDS last=-1 why="" step=15
+    [ "$stall_s" -ge 60 ] || step=1
+    while kill -0 "$cpid" 2>/dev/null; do
+      sleep "$step"
+      sz=$(wc -c <"$2" 2>/dev/null | tr -d ' ')
+      if [ "$sz" != "$last" ]; then last=$sz since=$SECONDS; fi
+      if [ $((SECONDS - start)) -ge $((tmo * 60)) ]; then why="timeout after ${tmo}m"
+      elif [ $((SECONDS - since)) -ge "$stall_s" ]; then why="stalled: claude wrote nothing for ${stall_s}s"; : >"$JOB/stalled"; fi
+      [ -z "$why" ] || { echo "$why" >>"$LOG"; kill -TERM -- "-$cpid"; kill "$cpid"; exit 0; }
+    done
+  ) 2>/dev/null &
   wd=$!; disown "$wd"
   wait "$cpid"; rc=$?
   stop_wd; cpid=""
+  # A stall while GitHub is unreachable is the outage, not this PR: not an attempt (fail() checks the
+  # file). Re-checked once; a stall with GitHub up counts like any failure.
+  if [ "$rc" -ne 0 ] && [ -e "$JOB/stalled" ]; then
+    if gh api user >/dev/null 2>>"$LOG"; then fail "claude wrote nothing for ${stall_s}s and was stopped (GitHub was reachable)"; fi
+    : >"$PR_AUTOPILOT_TRANSIENT_FILE"
+    fail "claude wrote nothing for ${stall_s}s and GitHub is unreachable"
+  fi
   jq -c 'select(.type == "result")' "$2" 2>/dev/null | tail -1 >"$2.result"
   total_cost=$(awk -v t="$total_cost" -v c="$(jq -r '.total_cost_usd // 0' "$2.result" 2>/dev/null)" 'BEGIN {printf "%.4f", t + c}')
 }
@@ -577,7 +599,7 @@ finish_fix() {
     git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
     newsha=$(git -C "$WT" rev-parse HEAD)
     posted=1
-    git -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
+    git_net -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
       { posted=0; fail "git push was rejected (not forced, remote probably moved)"; }
     local i seen=""
     for i in 1 2 3 4 5; do
@@ -695,7 +717,7 @@ finish_conflict() {
     fail "git commit of the merge failed"
   newsha=$(git -C "$WT" rev-parse HEAD)
   posted=1
-  git -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
+  git_net -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
     { posted=0; fail "git push was rejected (not forced, remote probably moved)"; }
   local i seen=""
   for i in 1 2 3 4 5; do
@@ -751,7 +773,7 @@ finish_cifix() {
   git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
   newsha=$(git -C "$WT" rev-parse HEAD)
   posted=1
-  git -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
+  git_net -C "$WT" -c core.hooksPath=/dev/null push -q --no-verify origin "HEAD:refs/heads/$branch" >>"$LOG" 2>&1 ||
     { posted=0; fail "git push was rejected (not forced, remote probably moved)"; }
   local i seen=""
   for i in 1 2 3 4 5; do

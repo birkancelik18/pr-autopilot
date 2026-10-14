@@ -325,6 +325,51 @@ check "review: POST answered 502 but applied: read back, exactly one review, suc
 )
 read -r pass fail <"$W/counts"
 
+echo "-- GitHub outage: a hung gh/git call or a silent claude fails fast and burns no attempt"
+(
+  . "$T/../scripts/lib.sh"; mkdir -p "$S/fake"
+  for tb in perl gtimeout; do # perl: the macOS fallback; gtimeout: a shim that records how it is called
+    if [ "$tb" = perl ]; then export PR_AUTOPILOT_TIMEOUT_BIN=""; else
+      printf '#!/usr/bin/env bash\necho "$@" >>"%s/gtimeout.args"\nshift 3; exec "$@"\n' "$S" >"$W/gtimeout"; chmod +x "$W/gtimeout"
+      export PR_AUTOPILOT_TIMEOUT_BIN=$W/gtimeout; fi
+    check "with_timeout ($tb) passes the command's exit status through" 3 "$(with_timeout 5 sh -c 'exit 3'; echo $?)"
+  done
+  check "the gtimeout path calls it as gtimeout -k 5 <secs> <cmd>" "-k 5 5 sh -c exit 3" "$(cat "$S/gtimeout.args")"
+  if real=$(env PATH="${PATH#"$W/bin:"}" bash -c 'command -v gtimeout || command -v timeout'); then
+    export PR_AUTOPILOT_TIMEOUT_BIN=$real; s0=$SECONDS; with_timeout 1 sleep 30; rc=$?
+    check "a real $(basename "$real") stops a hung command: exit 124 within seconds" "124 1" "$rc $([ $((SECONDS - s0)) -lt 8 ] && echo 1)"
+  fi
+  export PR_AUTOPILOT_TIMEOUT_BIN=""
+  s0=$SECONDS; with_timeout 1 sh -c 'sleep 30 & echo $! >"$1"; wait' _ "$W/child.pid"; rc=$?
+  sleep 0.3
+  check "perl fallback: a hung command and its children are stopped, exit 124, within seconds" "124 gone 1" \
+    "$rc $(kill -0 "$(cat "$W/child.pid")" 2>/dev/null && echo alive || echo gone) $([ $((SECONDS - s0)) -lt 8 ] && echo 1)"
+  GH_TIMEOUT=1 PR_AUTOPILOT_TRANSIENT_FILE=$W/tr; rm -f "$W/tr" "$S/fake/hung.pids"
+  s0=$SECONDS; err=$(FAKE_GH_HANG=1 gh api repos/acme/app/pulls/11 2>&1 >/dev/null); rc=$?
+  check "gh() read that hangs: exit 124 after GH_TIMEOUT, not retried, says so, marked transient" "124 1 1 yes 1" \
+    "$rc $(wc -l <"$S/fake/hung.pids" | tr -d ' ') $(grep -c 'gh timed out after 1s' <<<"$err") $([ -e "$W/tr" ] && echo yes) $([ $((SECONDS - s0)) -lt 8 ] && echo 1)"
+  rm -f "$W/tr"; FAKE_GH_HANG=1 gh api -X POST repos/acme/app/issues/1/comments -f body=x >/dev/null 2>&1; rc=$?
+  check "gh() write that hangs: 124, not marked transient (it may have landed; job.sh reads back)" "124 no" "$rc $([ -e "$W/tr" ] && echo yes || echo no)"
+  rm -f "$W/tr"; git_net -c alias.hang='!sleep 30' hang >/dev/null 2>"$W/gerr"; rc=$?
+  check "git_net: a hung git is stopped with 124 and marks the run transient" "124 yes 1" "$rc $([ -e "$W/tr" ] && echo yes) $(grep -c 'git timed out after 1s' "$W/gerr")"
+  echo "$pass $fail" >"$W/counts"
+)
+read -r pass fail <"$W/counts"
+jq '. + {gh_timeout_seconds: 1}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+reset; rm -f "$S/transient.tsv"; ev review false; s0=$SECONDS; FAKE_GH_HANG=1 FAKE_CLAUDE=review job
+check "GitHub hanging at job start: the job ends within seconds, no attempt burned, no report, noted transient" "1 0 0 1" \
+  "$([ $((SECONDS - s0)) -lt 15 ] && echo 1) $([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $(wc -l <"$S/transient.tsv" | tr -d ' ')"
+reset; rm -f "$S/transient.tsv"; ev review false; s0=$SECONDS; PR_AUTOPILOT_STALL_SECONDS=2 FAKE_CLAUDE=stall-offline job
+check "claude goes silent and GitHub is unreachable: stopped by the watchdog, no attempt burned, noted transient" "1 1 0 0 1 gone" \
+  "$([ $((SECONDS - s0)) -lt 20 ] && echo 1) $(grep -c '^stalled: claude wrote nothing for 2s' "$S/logs/"*review.log) $([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $(wc -l <"$S/transient.tsv" | tr -d ' ') $(kill -0 "$(cat "$S/hang.pid")" 2>/dev/null && echo alive || echo gone)"
+reset; rm -f "$S/transient.tsv"; ev review false; PR_AUTOPILOT_STALL_SECONDS=2 FAKE_CLAUDE=stall job
+check "claude goes silent but GitHub answers: a real failure, attempt 1 of 3" "1 0" \
+  "$(grep -c 'FAILED (attempt 1 of 3): claude wrote nothing for 2s and was stopped (GitHub was reachable)' "$S/notified") $(cat "$S/transient.tsv" 2>/dev/null | wc -l | tr -d ' ')"
+reset; jq '. + {job_timeout_minutes: 0}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"; ev review false; PR_AUTOPILOT_STALL_SECONDS=30 FAKE_CLAUDE=hang job
+check "the outer job_timeout_minutes cap still counts as an attempt" "1 1" \
+  "$(grep -c '^timeout after 0m' "$S/logs/"*review.log) $(grep -c 'FAILED (attempt 1 of 3): claude exited with status' "$S/notified")"
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"; rm -f "$S/transient.tsv"
+
 echo "-- fix, dry-run"
 reset; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
 check "fix allow list: edits in worktree + result file + test commands, no gh, no git" 0 "$(allow | grep -cE 'gh |git |Skill')"

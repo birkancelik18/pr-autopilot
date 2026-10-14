@@ -10,12 +10,43 @@ cfg() { jq -r "$1" "$CONFIG"; } # usage: cfg '.slack_webhook // ""'
 # cfgd <key> <default-json>: like cfg but keeps an explicit false (jq's // would replace it).
 cfgd() { jq -r --argjson d "$2" ".$1 as \$v | if \$v == null then \$d else \$v end" "$CONFIG"; }
 
+# with_timeout <seconds> <command...>: runs an external command, stopped (TERM, then KILL) after <seconds>;
+# exits 124 then, like coreutils timeout. Uses gtimeout/timeout when installed (macOS has neither by
+# default), else perl. PR_AUTOPILOT_TIMEOUT_BIN="" forces the perl path (tests).
+with_timeout() {
+  local s=$1 tb; shift
+  tb=${PR_AUTOPILOT_TIMEOUT_BIN-$(command -v gtimeout || command -v timeout)}
+  [ -z "$tb" ] || { "$tb" -k 5 "$s" "$@"; return; }
+  # Own process group, so a timeout or a TERM to us stops the command's children too (git spawns ssh/https helpers).
+  perl -e 'my $t = shift; my $pid = fork; defined $pid or die "fork: $!\n";
+    if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; die "exec $ARGV[0]: $!\n" }
+    my $stop = sub { kill "TERM", -$pid; sleep 1; kill "KILL", -$pid; exit $_[0] };
+    $SIG{TERM} = sub { $stop->(143) }; $SIG{INT} = sub { $stop->(130) }; $SIG{ALRM} = sub { $stop->(124) };
+    alarm $t; waitpid $pid, 0; my $st = $?; alarm 0;
+    exit($st & 127 ? 128 + ($st & 127) : $st >> 8)' "$s" "$@"
+}
+# Per-call limit for every gh and networked git call (config gh_timeout_seconds, default 60): an outage
+# must fail fast, not hang a job until job_timeout_minutes.
+GH_TIMEOUT=$(cfgd gh_timeout_seconds 60 2>/dev/null)
+[[ $GH_TIMEOUT =~ ^[1-9][0-9]*$ ]] || GH_TIMEOUT=60
+# git_net <git args...>: git fetch/push with the same limit; a timeout marks the run transient (job.sh).
+git_net() {
+  local rc
+  with_timeout "$GH_TIMEOUT" git "$@"; rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "git timed out after ${GH_TIMEOUT}s (GitHub unreachable?)" >&2
+    [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || : >"$PR_AUTOPILOT_TRANSIENT_FILE"
+  fi
+  return "$rc"
+}
+
 # gh: every call in the scripts goes through this wrapper (it shadows the binary). A transient network or
 # API error (the regex below) is retried after PR_AUTOPILOT_GH_RETRY seconds (default "2 5 10"); the
 # last try's output and exit status pass through. Writes (-X POST/PATCH/PUT/DELETE, -f/-F fields, gh pr
 # review/comment/create/edit) are retried only on 429 / secondary rate limit, which GitHub rejects before
 # applying anything: after a 502 or a reset the write may have landed, and a blind resend would post twice
-# as the user (job.sh reads back before re-sending). When retries run out on a read, the file
+# as the user (job.sh reads back before re-sending). Each try is cut off after GH_TIMEOUT seconds (exit
+# 124, not retried). When retries run out on a read, or a read times out, the file
 # PR_AUTOPILOT_TRANSIENT_FILE is created (job.sh uses it to not burn an attempt).
 GH_TRANSIENT_RE="can't assign requested address|connection reset|i/o timeout|TLS handshake timeout|HTTP (429|50[234])|secondary rate limit|error connecting to|connection refused|no such host|unexpected EOF|timeout awaiting"
 GH_REJECTED_RE="HTTP 429|secondary rate limit"
@@ -33,8 +64,13 @@ gh() {
   out=$(mktemp) err=$(mktemp)
   # The trailing "" is the last try: no sleep after it.
   for delay in ${PR_AUTOPILOT_GH_RETRY:-2 5 10} ""; do
-    command gh "$@" >"$out" 2>"$err"; rc=$?
+    with_timeout "$GH_TIMEOUT" gh "$@" >"$out" 2>"$err"; rc=$?
     [ "$rc" -ne 0 ] || break
+    if [ "$rc" -eq 124 ]; then # hung: an outage, retrying would only stack up minutes. A write may have landed.
+      echo "gh timed out after ${GH_TIMEOUT}s (GitHub unreachable?)" >>"$err"
+      [ "$write" = 1 ] || [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || : >"$PR_AUTOPILOT_TRANSIENT_FILE"
+      break
+    fi
     grep -qiE "$re" "$out" "$err" || break
     if [ -z "$delay" ]; then
       [ "$write" = 1 ] || [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || : >"$PR_AUTOPILOT_TRANSIENT_FILE"

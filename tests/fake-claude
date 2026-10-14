@@ -83,6 +83,8 @@ J
 J
     ;;
   hang) sleep 300 & echo $! >"$S/hang.pid"; wait ;;
+  stall) echo '{"type":"system","subtype":"init"}'; sleep 300 & echo $! >"$S/hang.pid"; wait ;; # alive, silent
+  stall-offline) echo '{"type":"system","subtype":"init"}'; mkdir -p "$S/fake"; touch "$S/fake/hang"; sleep 300 & echo $! >"$S/hang.pid"; wait ;;
   none) ;;
   review-limit-text)
     printf 'VERDICT: APPROVE\n\nNo blockers found.\n' >"$jd/draft.md"

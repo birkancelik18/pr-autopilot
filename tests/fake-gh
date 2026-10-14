@@ -8,6 +8,10 @@ if [ -n "${FAKE_GH_FLAKY:-}" ]; then
   c=$(cat "$S/flaky" 2>/dev/null || echo 0)
   if [ "$c" -lt "$FAKE_GH_FLAKY" ]; then echo $((c + 1)) >"$S/flaky"; echo "${FAKE_GH_FLAKY_MSG:-Get \"https://api.github.com/user\": net/http: TLS handshake timeout}" >&2; exit 1; fi
 fi
+# FAKE_GH_HANG=1 or a file $S/hang (a fake claude can create it mid-job): every call hangs, as in an outage.
+if [ -n "${FAKE_GH_HANG:-}" ] || [ -e "$S/hang" ]; then
+  echo $$ >>"$S/hung.pids"; sleep "${FAKE_GH_HANG_S:-30}"; exit 0
+fi
 args=("$@"); ep="" expr="" method=GET fields=() reviewers=() event="" commit_id=""
 if [ "${1:-}" = pr ] && [ "${2:-}" = diff ]; then
   [ -n "${FAKE_DIFF_TOO_LARGE:-}" ] && { echo "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)" >&2; exit 1; }
