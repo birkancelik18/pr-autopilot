@@ -41,13 +41,13 @@ def maxid: if length == 0 then null else max_by(.id) end;
         # APPROVED review whose body is more than a bare approval phrase.
         | ([$latest[] | select(.state == "APPROVED" and ((.body // "") | gsub("\\s+"; " ") | ascii_downcase
             | test("^ ?((lgtm|looks good( to me)?|approved?|ship ?it|nice( work)?|great( work)?|thanks?( you)?)[ .!]*|:shipit:|\\+1|👍|🚀)? ?$") | not))] | maxid) as $ap
-        # Unresolved review threads that a trusted voice started (me, a trusted person, or a known review
+        # Unresolved review threads that a trusted voice started (.starter, fetched on its own; me, a trusted person, or a known review
         # bot such as CodeRabbit: a bot can relay a stranger, so any other bot does not count) and whose
         # newest comment is from a trusted voice other than me (my own reply last: nothing new).
         # Keyed on that newest comment, so a new one runs again (capped per PR in poll.sh).
         | def tvoice: .login == $me or (.login | IN($ignore[]) | not) and ((.login | IN($review_bots[]))
             or (.login | endswith("[bot]") | not) and ((.assoc | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.login | IN($trusted[]))));
-          ([($threads[0] // [])[] | select(.resolved | not) | select((.comments | length) > 0 and (.comments[0] | tvoice))
+          ([($threads[0] // [])[] | select(.resolved | not) | select(.starter != null and (.starter | tvoice))
             | .comments | last | select(.login != $me and tvoice)]
           | if length == 0 then null else max_by(.id) | {id, user: {login}} end) as $t
         | (if $fix_enabled and ([$cr, $rc, $c, $i, $ap, $t] | any(. != null)) then [{

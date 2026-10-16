@@ -88,15 +88,18 @@ is_paused() { [ -f "$STATE_DIR/paused" ]; }
 review_bots() { jq -c '(.review_bots | arrays) // ["coderabbitai[bot]"]' "$CONFIG"; }
 
 # review_threads <owner/name> <pr>: the PR's review threads (first 100, last 20 comments each) as
-# [{id, resolved, comments: [{id, login, assoc}]}]. Only GraphQL knows whether a thread is resolved.
+# [{id, resolved, starter: {id, login, assoc} or null, comments: [{id, login, assoc}]}]. Only GraphQL knows
+# whether a thread is resolved. starter is fetched on its own: past 20 comments, comments[0] is not it.
 # A bot's login gets the "[bot]" suffix the REST API shows (coderabbitai -> coderabbitai[bot]).
 review_threads() {
   gh api graphql -f owner="${1%%/*}" -f name="${1#*/}" -F number="$2" -f query='query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
-      id isResolved comments(last: 20) { nodes { databaseId authorAssociation author { login __typename } } } } } } } }' |
-    jq -e '[.data.repository.pullRequest.reviewThreads.nodes[] | {id, resolved: .isResolved,
-      comments: [.comments.nodes[] | {id: .databaseId, assoc: (.authorAssociation // "NONE"),
-        login: ((.author.login // "ghost") + (if .author.__typename == "Bot" then "[bot]" else "" end))}]}]'
+      id isResolved starter: comments(first: 1) { nodes { databaseId authorAssociation author { login __typename } } }
+      comments(last: 20) { nodes { databaseId authorAssociation author { login __typename } } } } } } } }' |
+    jq -e 'def c: {id: .databaseId, assoc: (.authorAssociation // "NONE"),
+        login: ((.author.login // "ghost") + (if .author.__typename == "Bot" then "[bot]" else "" end))};
+      [.data.repository.pullRequest.reviewThreads.nodes[] | {id, resolved: .isResolved,
+        starter: ((.starter.nodes // [])[0] | if . then c else null end), comments: [.comments.nodes[] | c]}]'
 }
 
 # ci_source "local" (default "github"): CI is ci-local, run on this machine, not GitHub's check runs.

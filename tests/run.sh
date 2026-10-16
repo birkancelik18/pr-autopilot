@@ -184,18 +184,23 @@ echo "== poller: an unresolved CodeRabbit thread on my approved PR starts the fe
 : >"$S/handled.tsv"; : >"$S/seen.tsv"; : >"$S/failed.tsv"; bump 18
 cat >"$FIX/threads-18.json" <<'J'
 {"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
- {"id":"T9","isResolved":false,"comments":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
+ {"id":"T9","isResolved":false,"starter":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]},"comments":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
 J
 n0=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
 check "fix job for #18 keyed on the thread's newest comment" 1 "$(newjobs | grep -c '"fix","acme/app",18,"hhh888",true,"fix|acme/app|18|r0-v0-c[0-9]*-i0-t8101"\]')"
 n0=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
 check "handled: the same thread does not start it again" 0 "$(newjobs | grep -c '"fix","acme/app",18')"
+jq -n '{data: {repository: {pullRequest: {reviewThreads: {nodes: [{id: "T8", isResolved: false,
+  starter: {nodes: [{databaseId: 9000, authorAssociation: "NONE", author: {login: "rando", __typename: "User"}}]},
+  comments: {nodes: [range(9001; 9021) | {databaseId: ., authorAssociation: "NONE", author: {login: "coderabbitai", __typename: "Bot"}}]}}]}}}}}' >"$FIX/threads-18.json"
+: >"$S/handled.tsv"; bump 18; n0=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
+check "a stranger's thread of 21 comments (last 20 all CodeRabbit) starts nothing: trust is judged on the starter" 0 "$(newjobs | grep -c '"fix","acme/app",18')"
 rm -f "$FIX/threads-18.json"; bump 18; n0=$(jobs_n); FAKE_GH_FAIL="POST graphql" FAKE_NOTIF_EMPTY=1 poll
 check "threads cannot be read: own PRs wait for the next poll, nothing starts" "0 1" "$(newjobs | grep -c ',18,') $([ "$(plog 'acme/app#18: could not fetch review threads')" -ge 1 ] && echo 1)"
 echo "== poller: feedback fixes are capped per head and per PR (max_feedback_fixes), so a bot and the fixer cannot loop"
 cat >"$FIX/threads-18.json" <<'J'
 {"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
- {"id":"T9","isResolved":false,"comments":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}},
+ {"id":"T9","isResolved":false,"starter":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]},"comments":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}},
   {"databaseId":8102,"authorAssociation":"OWNER","author":{"login":"me","__typename":"User"}},
   {"databaseId":8103,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
 J
@@ -650,8 +655,8 @@ check "more replies than open human comments is refused before any write" "1 0" 
 echo "-- fix: review threads are handed over with their resolved state; a review bot's comment may get a reply"
 cat >"$FIX/threads-11.json" <<'J'
 {"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
- {"id":"T1","isResolved":false,"comments":{"nodes":[{"databaseId":5001,"authorAssociation":"MEMBER","author":{"login":"bob","__typename":"User"}}]}},
- {"id":"T2","isResolved":true,"comments":{"nodes":[{"databaseId":5009,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
+ {"id":"T1","isResolved":false,"starter":{"nodes":[{"databaseId":5001,"authorAssociation":"MEMBER","author":{"login":"bob","__typename":"User"}}]},"comments":{"nodes":[{"databaseId":5001,"authorAssociation":"MEMBER","author":{"login":"bob","__typename":"User"}}]}},
+ {"id":"T2","isResolved":true,"starter":{"nodes":[{"databaseId":5009,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]},"comments":{"nodes":[{"databaseId":5009,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
 J
 cp "$FIX/comments-11.json" "$W/comments-11.bak"
 jq '. + [{"id": 5009, "user": {"login": "coderabbitai[bot]"}, "body": "Guard against an empty list.", "author_association": "NONE"},
@@ -747,7 +752,7 @@ jq -n '[{id: 940, state: "CHANGES_REQUESTED", user: {login: "pal"}, author_assoc
 check "a later approval with comments replaces the changes request: keyed on the approval" "fix|acme/app|18|r0-v0-c0-i0-a950" \
   "$(cls "$FIX/pr-18.json" "$W/ap2.json" "$W/empty.json" "$W/empty.json" author true | jq -r .key)"
 th() { # th <resolved> <comments json array>: one review thread on own PR #18, classified
-  jq -n --argjson r "$1" --argjson c "$2" '[{id: "T1", resolved: $r, comments: $c}]' >"$W/th.json"
+  jq -n --argjson r "$1" --argjson c "$2" '[{id: "T1", resolved: $r, starter: $c[0], comments: $c}]' >"$W/th.json"
   THREADS=$W/th.json cls "$FIX/pr-18.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r '.key // .skip'
 }
 bot='{"id": 8001, "login": "coderabbitai[bot]", "assoc": "NONE"}'
@@ -762,7 +767,7 @@ check "a thread a member or I started, answered by CodeRabbit: a fix" "fix|acme/
 check "a thread started by a bot that is not a known review bot starts nothing" "nothing to address" "$(th false "[$other, $bot]")"
 check "review_bots in config adds a bot" "fix|acme/app|18|r0-v0-c0-i0-t8001" "$(RBOTS='["coderabbitai[bot]","dependabot[bot]"]' th false "[$other, $bot]")"
 check "CodeRabbit answers my reply: a new key (the poller's max_feedback_fixes cap bounds this loop)" "fix|acme/app|18|r0-v0-c0-i0-t8009" "$(th false "[$bot, $mine, $bot2]")"
-check "a bot listed in ignore_authors is still ignored" "nothing to address" "$(jq -n --argjson c "[$bot]" '[{id: "T1", resolved: false, comments: $c}]' >"$W/th.json"
+check "a bot listed in ignore_authors is still ignored" "nothing to address" "$(jq -n --argjson c "[$bot]" '[{id: "T1", resolved: false, starter: $c[0], comments: $c}]' >"$W/th.json"
   jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason author --arg repo acme/app --argjson ignore '["coderabbitai[bot]"]' --argjson trusted '[]' --argjson via_search true --argjson review_bots "$RB_DEFAULT" --argjson ci_container false \
     --argjson allow_forks false --argjson review_enabled true --argjson fix_enabled true --argjson conflict_enabled true --argjson ci_enabled true --argjson ci_local false \
     --slurpfile pr "$FIX/pr-18.json" --slurpfile reviews "$W/empty.json" --slurpfile comments "$W/empty.json" --slurpfile issue "$W/empty.json" \
