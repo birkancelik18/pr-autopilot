@@ -408,6 +408,20 @@ if [ -z "$skip_model" ]; then
 fi
 
 # =============================== review: post the draft ===============================
+# ci_review_note <record>: what a review says about failing local CI: the summary, then the last lines
+# of each failing job's log (at most 3 jobs, 15 lines each). Log text is untrusted: a fence in it is
+# broken up so it cannot close ours, and the whole body is defanged before posting.
+ci_review_note() {
+  local s j log
+  s=$(ci_summary "$1") || return 1
+  printf '%s.\n' "L${s#l}"
+  while IFS=$'\t' read -r j log; do
+    [ -f "$log" ] || continue
+    printf '\nLast lines of %s:\n\n```\n' "$j"
+    tail -n 15 "$log" | cut -c1-200 | sed 's/```/` ` `/g'
+    printf '```\n'
+  done < <(jq -r '[.jobs[] | select(.exit_code != 0 or .skipped_reason != null)][0:3][] | [.job, (.log // "")] | @tsv' "$1")
+}
 finish_review() {
   [ "${agent_calls:-0}" -ge "$npasses" ] ||
     fail "review needs $npasses parallel passes but only ${agent_calls:-0} subagent call(s) ran (max in one message: ${agent_parallel:-0})"
@@ -444,6 +458,18 @@ finish_review() {
   [ "$body_words" -le 150 ] || fail "draft body is $body_words words even after asking for a rewrite, limit is 150"
   [ -z "$tells" ] || fail "the draft still reads machine-written after a rewrite ($tells)"
   why=$(head -1 "$JOB/body.md" | cut -c1-160)
+  # Local CI: APPROVE only when this head's ci-local record is pass. Otherwise REQUEST_CHANGES (a
+  # COMMENT when the code review found nothing), naming the failing jobs with the tail of their logs.
+  if ci_local; then
+    local rec; rec=$(ci_record "$repo" "$head")
+    [ -s "$rec" ] || fail "no local CI record for ${head:0:8} (the poller runs ci-local before the review)"
+    if [ "$(jq -r --arg h "$head" 'if .sha == $h then .result else "for another commit" end' "$rec" 2>/dev/null)" != pass ]; then
+      ci_review_note "$rec" >"$JOB/ci-note.md" || fail "the ci-local record $rec is unreadable"
+      if [ "$event" = APPROVE ]; then event=COMMENT state=COMMENTED; cp "$JOB/ci-note.md" "$JOB/body.md"
+      else { echo; cat "$JOB/ci-note.md"; } >>"$JOB/body.md"; fi
+      why=$(ci_summary "$rec")
+    fi
+  fi
 
   check_head
   local already assoc

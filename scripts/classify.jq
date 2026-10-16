@@ -65,6 +65,8 @@ def maxid: if length == 0 then null else max_by(.id) end;
       elif ([$rv[] | select(.user.login == $me and .commit_id == $p.head.sha
           and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | length) > 0 then
         {skip: "already reviewed this head"}
+      # Local CI: ci-local runs on the head first; the review's verdict depends on its record (job.sh).
+      elif $ci_local and $rec == null then {kind: "cilocal", key: $lkey, who: $p.user.login}
       else {kind: "review", key: "review|\($repo)|\($p.number)|\($p.head.sha)", who: $p.user.login}
       end
     else {skip: "not actionable (reason: \($reason))"}

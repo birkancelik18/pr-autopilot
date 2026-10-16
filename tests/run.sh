@@ -567,6 +567,22 @@ check "incomplete is a CI fix too; flaky: no GitHub job is re-run, nothing pushe
   "$(jq -r '.[0].conclusion' "$(cat "$S/claude.jobdir")/ci/failed.json") $(cat "$S/writes.log" 2>/dev/null | grep -c rerun) $(git -C "$O" rev-parse feature-11) $(grep -c 'not caused by the code (the runner lost its network). Nothing is re-run; this one needs you' "$S/notified")"
 lrec pass; reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job
 check "the record says pass: quiet skip although GitHub's checks are red" "0 $SHA" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $(git -C "$O" rev-parse feature-11)"
+echo "-- local CI decides whether a review on someone else's PR may APPROVE"
+lrec pass; reset; ev review false; FAKE_CLAUDE=review job
+check "record pass and a clean review: APPROVE is posted" 1 "$(grep -c "event=APPROVE commit_id=$SHA" "$S/writes.log")"
+lrec fail; printf '```\nhi @everyone\n' >>"$DAVID_STATE/ci-local/logs/test.log"; reset; ev review false; FAKE_CLAUDE=review job
+jd=$(cat "$S/claude.jobdir")
+check "record fail and a clean review: a COMMENT, never an APPROVE, naming the failing job" "1 0 1" \
+  "$(grep -c "event=COMMENT commit_id=$SHA" "$S/writes.log") $(grep -c 'event=APPROVE' "$S/writes.log") $(grep -c "^Local CI failed on #11 (${SHA:0:8}): test (exit 1)\.$" "$jd/body.safe.md")"
+check "with its log tail; a fence in the log cannot close ours, a mention in it cannot ping" "1 2 1" \
+  "$(grep -c '^FAIL src/a.test.ts' "$jd/body.safe.md") $(grep -c '^```$' "$jd/body.safe.md") $(grep -c 'hi `@everyone`' "$jd/body.safe.md")"
+check "the report says what was posted and why" 1 "$(grep -c "I posted COMMENT (verified on GitHub, review 777, commit ${SHA:0:7}): local CI failed on #11 (${SHA:0:8}): test (exit 1)" "$S/notified")"
+lrec incomplete; reset; ev review false; FAKE_CLAUDE=review-rc job
+jd=$(cat "$S/claude.jobdir")
+check "record incomplete and a code blocker: REQUEST_CHANGES with the blocker and the skipped job" "1 1 1" \
+  "$(grep -c 'event=REQUEST_CHANGES' "$S/writes.log") $(grep -c '^src/a.txt:2 drops the null check' "$jd/body.safe.md") $(grep -c 'test (skipped: docker is not installed)' "$jd/body.safe.md")"
+rm -rf "$DAVID_STATE"; reset; ev review false; FAKE_CLAUDE=review job
+check "no record for the head: fails loudly, posts nothing" "1 0" "$(grep -c 'FAILED (attempt 1 of 3): no local CI record for' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
 cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"; rm -rf "$DAVID_STATE"
 
 echo "== safety: fix job has no shell, commits only listed files"
@@ -632,6 +648,10 @@ check "local CI record fail or incomplete: a CI fix keyed on the head; pass: not
   "$(CIREC=$W/rec-fail.json lcls "$FIX/pr-18.json" | jq -r .key) $(CIREC=$W/rec-incomplete.json lcls "$FIX/pr-18.json" | jq -r .key) $(CIREC=$W/rec-pass.json lcls "$FIX/pr-18.json" | jq -r .skip)"
 echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
 check "local CI: feedback, conflict, then ci-local" "fix conflict cilocal" "$(lcls "$W/pr-dirty.json" "$W/c.json" | jq -r '[.steps[].kind] | join(" ")')"
+check "local CI, review requested, no record: ci-local runs on that head first" "cilocal cilocal|acme/app|11|$SHA" \
+  "$(CILOCAL_ON=true cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r '"\(.kind) \(.key)"')"
+check "local CI, review requested, a record of any result: the review" "review review" \
+  "$(for r in pass fail; do CILOCAL_ON=true CIREC=$W/rec-$r.json cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r .kind; done | paste -sd' ' -)"
 echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
 check "feedback, conflict and red CI: steps in that order" "fix conflict cifix" "$(CHECKS=$W/ck-red.json cls "$W/pr-dirty.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '[.steps[].kind] | join(" ")')"
 echo '[{"id":9,"user":{"login":"rando"},"author_association":"NONE","body":"x"}]' >"$W/c.json"

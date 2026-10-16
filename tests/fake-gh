@@ -61,7 +61,7 @@ case "$method $ep" in
     n=$(num "$ep")
     jq -s 'add' <(cat "$FIX/reviews-$n.json" 2>/dev/null || echo '[]') <(cat "$S/posted-reviews.json" 2>/dev/null || echo '[]') ;;
   "POST repos/"*/pulls/*/reviews)
-    state=APPROVED; [ "$event" = REQUEST_CHANGES ] && state=CHANGES_REQUESTED
+    state=APPROVED; [ "$event" = REQUEST_CHANGES ] && state=CHANGES_REQUESTED; [ "$event" = COMMENT ] && state=COMMENTED
     echo "POST $ep event=$event commit_id=$commit_id" >>"$W"
     jq -n --arg c "$commit_id" --arg s "$state" '{id: 777, user: {login: "me"}, commit_id: $c, state: $s, submitted_at: (now | todate)}' >"$S/new"
     jq -s 'add' <(cat "$S/posted-reviews.json" 2>/dev/null || echo '[]') <(jq -s . "$S/new") >"$S/p.tmp" && mv "$S/p.tmp" "$S/posted-reviews.json"
