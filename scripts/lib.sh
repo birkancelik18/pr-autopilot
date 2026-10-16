@@ -83,6 +83,21 @@ gh() {
 }
 is_paused() { [ -f "$STATE_DIR/paused" ]; }
 
+# ci_source "local" (default "github"): CI is ci-local, run on this machine, not GitHub's check runs.
+# ci-local <pr> --repo <owner/name> writes one record per head commit (README, Config) and exits 0 only on pass.
+CI_LOCAL=${PR_AUTOPILOT_CI_LOCAL:-$HOME/david/bin/ci-local}
+ci_local() { [ "$(cfg '.ci_source // "github"' 2>/dev/null)" = local ]; }
+ci_record() { printf '%s/ci-local/%s/%s.json' "${DAVID_STATE:-$HOME/david/state}" "${1//\//__}" "$2"; } # <owner/name> <sha>
+# ci_summary <record>: one line, "local CI passed on #N (sha8), jobs: a, b" or "local CI failed on #N (sha8): x (exit 1)".
+ci_summary() {
+  jq -r '[.jobs[] | select(.exit_code != 0 or .skipped_reason != null)] as $bad
+    | "local CI \(if .result == "pass" then "passed" elif .result == "fail" then "failed" else "failed (incomplete)" end) on #\(.pr) (\(.sha[0:8]))"
+    + if .result == "pass" then ", jobs: " + ([.jobs[].job] | join(", "))
+      elif ($bad | length) == 0 then ": ci-local ran no job"
+      else ": " + ($bad | map(.job + if .skipped_reason then " (skipped: \(.skipped_reason))" else " (exit \(.exit_code))" end) | join(", ")) end' \
+    "$1" | head -c 700
+}
+
 # report <message>: macOS notification (notify-send on Linux) plus Slack if configured.
 report() {
   local msg=$1 hook

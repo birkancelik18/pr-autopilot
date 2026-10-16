@@ -65,6 +65,7 @@ flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson fix_enabled "$(cfgd fix_enabled true)"
   --argjson conflict_enabled "$(cfgd conflict_enabled true)"
   --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
+  --argjson ci_local "$(ci_local && echo true || echo false)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")")
 
@@ -114,7 +115,7 @@ running() {
 key_running() {
   local f
   for f in "$STATE_DIR"/running/*; do
-    [ -e "$f" ] && kill -0 "$(basename "$f")" 2>/dev/null && [ "$(cat "$f")" = "$1" ] && return 0
+    [ -e "$f" ] && kill -0 "$(basename "$f")" 2>/dev/null && [[ "$(cat "$f")" == $1 ]] && return 0 # $1 may be a glob
   done
   return 1
 }
@@ -158,15 +159,21 @@ process_item() {
     fetch "repos/$repo/pulls/$n/comments" "$tmp/comments" paginated &&
     fetch "repos/$repo/issues/$n/comments" "$tmp/issue" paginated ||
     { log "ERROR $repo#$n: could not fetch PR data, will retry next poll"; return 1; }
-  # CI results only matter on the user's own PRs.
-  echo '{"check_runs": []}' >"$tmp/checks"
-  if [ "$(jq -r .user.login "$tmp/pr")" = "$me" ]; then
+  # CI results only matter on the user's own PRs. With ci_source local, CI is the head's ci-local
+  # record (null: not run yet) and GitHub's check runs are never read.
+  echo '{"check_runs": []}' >"$tmp/checks"; echo null >"$tmp/cirec"
+  if ci_local; then
+    local rec; rec=$(ci_record "$repo" "$(jq -r .head.sha "$tmp/pr")")
+    if [ -s "$rec" ] && ! jq -e 'select(type == "object")' "$rec" >"$tmp/cirec" 2>/dev/null; then
+      log "ERROR $repo#$n: unreadable ci-local record $rec, will retry next poll"; return 1
+    fi
+  elif [ "$(jq -r .user.login "$tmp/pr")" = "$me" ]; then
     fetch "repos/$repo/commits/$(jq -r .head.sha "$tmp/pr")/check-runs?per_page=100" "$tmp/checks" ||
       { log "ERROR $repo#$n: could not fetch check runs, will retry next poll"; return 1; }
   fi
   ev=$(jq -n -c -f "$DIR/classify.jq" --arg me "$me" --arg reason "$reason" --arg repo "$repo" \
     --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
-    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks") ||
+    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks" --slurpfile cirec "$tmp/cirec") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
   # What failed.tsv pruning below may keep for this PR: only the keys of its current state. A skip
   # (draft, nothing to address) says nothing about a failure, except closed or merged.
@@ -197,8 +204,9 @@ process_item() {
     log "skip $repo#$n: CI still failing after $MAX_CI_FIXES fix attempts"
     if ! grep -qxF "$mode|$repo#$n" "$STATE_DIR/ci-gave-up.tsv" 2>/dev/null; then
       echo "$mode|$repo#$n" >>"$STATE_DIR/ci-gave-up.tsv"
+      local lc=""; ci_local && lc="local "
       report "$(jq -r .url <<<"$ev")
-PR #$n ($(jq -r .title <<<"$ev")): CI is still failing after $MAX_CI_FIXES fix attempts. I stopped; this one needs you."
+PR #$n ($(jq -r .title <<<"$ev")): ${lc}CI is still failing after $MAX_CI_FIXES fix attempts. I stopped; this one needs you."
     fi
     settle; return 0
   fi
@@ -213,6 +221,10 @@ PR #$n ($(jq -r .title <<<"$ev")): CI is still failing after $MAX_CI_FIXES fix a
   fi
   if [ -n "$limited" ]; then return 0; fi
   if [ "$(running)" -ge "$max" ]; then log "at max_parallel=$max, deferring $repo#$n"; return 0; fi
+  # ci-local runs one PR at a time: start one, the rest wait for a later poll.
+  if [ "$(jq -r .kind <<<"$ev")" = cilocal ] && key_running "$mode|cilocal|*"; then
+    log "a ci-local run is going, queueing $repo#$n"; return 0
+  fi
 
   file="$STATE_DIR/events/$(date +%Y%m%dT%H%M%S)-${repo//\//_}-$n.json"
   thread=$(jq -r .thread <<<"$item")

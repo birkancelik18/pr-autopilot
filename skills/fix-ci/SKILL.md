@@ -17,6 +17,8 @@ You are fixing failing CI on the user's own PR. Arguments: $ARGUMENTS
 
 In `job_dir`: `ci/failed.json` (each failing check: name, conclusion, title, summary, text, details_url, and `log`: the exact path of its log file, or null when no log could be fetched — read that path directly, do not guess file names), the log files themselves (the last 400 lines of each failing GitHub Actions job), `pr.json`, `diff.patch`, `reviews.json`, `comments.json`, `issue-comments.json`, and `conventions/` (the repo's rules as `.txt` files; follow them when you edit). The current directory is the PR's head commit.
 
+When the entries in `ci/failed.json` have a `command` field, CI ran locally (ci-local), not on GitHub: each entry is a failing or skipped job with the shell `command` it ran, its `exit_code` (null when it did not finish), `skipped_reason` (why it was skipped, or null) and `log`. There is nothing to re-run: for a flaky or infrastructure failure, or a skipped job, choose `none` and say why.
+
 `<job_dir>/voice.md` says how anything that gets posted under the user's name must read. Read it before you write anything that will be posted, and follow it.
 
 ## 1. Find the cause

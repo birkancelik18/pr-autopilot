@@ -31,11 +31,12 @@ clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downc
 
 if [ "$kind" = review ]; then what="$who asked you to review it"
 elif [ "$kind" = conflict ]; then what="yours has merge conflicts with $base"
-elif [ "$kind" = cifix ]; then what="CI failed on yours"
+elif [ "$kind" = cifix ]; then what="$(ci_local && echo "local ")CI failed on yours"
 elif [ "$cr" = true ]; then what="$who requested changes on yours"
 else what="$who commented on yours"; fi
 # The PR link leads the notification: a click cannot open it, so it has to be readable.
 prefix="PR #$n ($title): $what."
+[ "$kind" = cilocal ] && prefix="PR #$n ($title):" # its outcome says it: "local CI passed on #N (sha8)"
 [ "$dry" = true ] && prefix="[DRY RUN] $prefix"
 prefix="$url
 $prefix"
@@ -129,6 +130,32 @@ case $ourl in
   *) fail "the clone's origin ($ourl) does not point at $repo, refusing to fetch or push" ;;
 esac
 abort_if_paused
+
+# --- local CI (ci_source local): run ci-local on this head and report its record. No model and no
+# checkout here: ci-local makes its own worktree and writes nothing to GitHub. The poller starts one
+# of these at a time. Also in dry-run: it is the CI, not a write.
+if [ "$kind" = cilocal ]; then
+  check_head
+  rec=$(ci_record "$repo" "$head") rc=0
+  ci_tmo=$(cfgd ci_timeout_minutes 90)
+  if [ ! -s "$rec" ]; then
+    [ -x "$CI_LOCAL" ] || fail "ci_source is local but $CI_LOCAL is not an executable"
+    echo "running: $CI_LOCAL $n --repo $repo (timeout ${ci_tmo}m)" >>"$LOG"
+    set -m
+    with_timeout $((ci_tmo * 60)) "$CI_LOCAL" "$n" --repo "$repo" >>"$LOG" 2>&1 </dev/null &
+    cpid=$!
+    set +m
+    wait "$cpid"; rc=$?; cpid=""
+    echo "ci-local exited with status $rc" >>"$LOG"
+  fi
+  if [ ! -s "$rec" ]; then
+    check_head # the head moved: ci-local ran the new one
+    [ "$rc" -ne 124 ] || fail "ci-local timed out after ${ci_tmo}m (ci_timeout_minutes) and wrote no record for ${head:0:8}"
+    fail "ci-local exited with status $rc and wrote no record for ${head:0:8}"
+  fi
+  sum=$(ci_summary "$rec") || fail "the ci-local record $rec is unreadable"
+  succeed "$sum."
+fi
 
 # --- pre-fetch everything the model may read into the job dir (all of it is untrusted data)
 gh_get "repos/$repo/pulls/$n" >"$JOB/pr.json" || fail "fetch PR failed"
@@ -232,7 +259,26 @@ fi
 
 # --- failing CI: hand the model the failing checks and the tail of each GitHub Actions job log
 # (untrusted data, like the rest of the PR). The model only edits files; CI verifies the fix.
-if [ "$kind" = cifix ]; then
+if [ "$kind" = cifix ] && ci_local; then
+  # Local CI: the failing jobs of this head's ci-local record, each with its command and log tail.
+  mkdir -p "$JOB/ci"
+  rec=$(ci_record "$repo" "$head")
+  jq -e --arg h "$head" '.sha == $h and (.result | IN("fail", "incomplete"))' "$rec" >/dev/null 2>&1 ||
+    skip_quietly "no failing local CI record for this commit any more"
+  ci_i=0
+  while IFS= read -r ci_j; do
+    ci_i=$((ci_i + 1))
+    ci_name=$(jq -r '.job' <<<"$ci_j") ci_src=$(jq -r '.log // ""' <<<"$ci_j")
+    ci_log="$JOB/ci/$ci_i-$(printf '%s' "$ci_name" | tr -c 'A-Za-z0-9._-' _ | cut -c1-60).log"
+    if [ -f "$ci_src" ] && tail -n 400 "$ci_src" >"$ci_log" && [ -s "$ci_log" ]; then :
+    else echo "could not read the log of $ci_name ($ci_src)" >>"$LOG"; ci_log=""; fi
+    jq -c --arg l "$ci_log" '{name: .job, workflow, conclusion: (if .skipped_reason then "skipped" else "failure" end),
+      command, exit_code, skipped_reason, log: (if $l == "" then null else $l end)}' <<<"$ci_j"
+  done < <(jq -c '.jobs[] | select(.exit_code != 0 or .skipped_reason != null)' "$rec") | jq -s . >"$JOB/ci/failed.json" ||
+    fail "could not read the failing jobs from $rec"
+  [ "$(jq length "$JOB/ci/failed.json")" -gt 0 ] ||
+    succeed "$(ci_summary "$rec"). No job to fix, ci-local could not run it; this one needs you."
+elif [ "$kind" = cifix ]; then
   mkdir -p "$JOB/ci"
   gh_get "repos/$repo/commits/$head/check-runs?per_page=100" | jq '[.check_runs[]
     | select((.conclusion // "") | IN("failure", "timed_out"))
@@ -741,6 +787,9 @@ finish_cifix() {
   if [ "$action" = none ]; then
     succeed "I did not fix the failing CI: $summary. This one needs you."
   fi
+  if [ "$action" = rerun ] && ci_local; then # GitHub jobs are never re-run as CI when CI is local
+    succeed "I think the local CI failure is not caused by the code ($summary). Nothing is re-run; this one needs you."
+  fi
   if [ "$action" = rerun ]; then
     # Flaky or infrastructure failure: re-run the failed GitHub Actions jobs. Once per commit: the
     # job key is the head sha, so a second red run on the same commit is left to the user.
@@ -780,7 +829,8 @@ finish_cifix() {
     seen=$(gh_get "repos/$repo/pulls/$n" --jq .head.sha); [ "$seen" = "$newsha" ] && break; sleep 2
   done
   [ "$seen" = "$newsha" ] || fail "pushed ${newsha:0:7} but GitHub shows head ${seen:0:7}"
-  succeed "I fixed the failing CI: $summary, pushed ${newsha:0:7} (verified on GitHub). CI runs again."
+  local again="CI runs again."; ci_local && again="Local CI runs on the new head next."
+  succeed "I fixed the failing CI: $summary, pushed ${newsha:0:7} (verified on GitHub). $again"
 }
 
 if [ "$kind" = review ]; then finish_review

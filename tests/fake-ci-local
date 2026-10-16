@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake ci-local for tests: fake-ci-local <pr> --repo <owner/name>. Logs its arguments, then writes the
+# record of commit FAKE_CILOCAL_SHA (tmp + rename, like the real one) as FAKE_CILOCAL says: pass, fail or
+# incomplete; none writes no record and exits 2 (PR not resolvable). Exits 0 only on pass.
+echo "$*" >>"$PR_AUTOPILOT_STATE/ci-local.calls"
+d=$DAVID_STATE/ci-local slug=${3//\//__} r=${FAKE_CILOCAL:-pass}
+[ "$r" = none ] && exit 2
+mkdir -p "$d/$slug" "$d/logs"
+printf 'eslint: 0 problems\n' >"$d/logs/lint.log"
+printf 'step 1\nFAIL src/a.test.ts > expects the old label\nExpected: "A" Received: "B"\n' >"$d/logs/test.log"
+jq -n --arg repo "$3" --argjson pr "$1" --arg sha "$FAKE_CILOCAL_SHA" --arg r "$r" --arg d "$d/logs" '
+  {repo: $repo, pr: $pr, sha: $sha, result: $r, started_at: "2026-10-16T10:00:00+00:00", finished_at: "2026-10-16T10:05:00+00:00",
+   jobs: [{workflow: "lint.yml", job: "lint", command: "npm run lint", exit_code: 0, seconds: 1, log: "\($d)/lint.log", skipped_reason: null},
+     {workflow: "test.yml", job: "test", command: "npm test", seconds: 2, log: "\($d)/test.log",
+      exit_code: (if $r == "pass" then 0 elif $r == "fail" then 1 else null end),
+      skipped_reason: (if $r == "incomplete" then "docker is not installed" else null end)}]}' >"$d/$slug/.tmp" &&
+  mv "$d/$slug/.tmp" "$d/$slug/$FAKE_CILOCAL_SHA.json"
+[ "$r" = pass ]
