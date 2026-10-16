@@ -84,6 +84,8 @@ gh() {
   return "$rc"
 }
 is_paused() { [ -f "$STATE_DIR/paused" ]; }
+# Bot logins whose review threads are feedback (config review_bots); any other bot is not.
+review_bots() { jq -c '(.review_bots | arrays) // ["coderabbitai[bot]"]' "$CONFIG"; }
 
 # review_threads <owner/name> <pr>: the PR's review threads (first 100, last 20 comments each) as
 # [{id, resolved, comments: [{id, login, assoc}]}]. Only GraphQL knows whether a thread is resolved.

@@ -67,7 +67,14 @@ flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
   --argjson ci_local "$(ci_local && echo true || echo false)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
-  --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")")
+  --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")"
+  --argjson review_bots "$(review_bots)")
+# Feedback-fix cap (config max_feedback_fixes {per_head, per_pr}): a review bot and the fixer answering
+# each other must not loop. job.sh records each finished fix in fixes.tsv: "mode|repo|n<TAB>head".
+MAX_FIX_HEAD=$(jq -r '(.max_feedback_fixes | objects | .per_head) // 3' "$CONFIG")
+MAX_FIX_PR=$(jq -r '(.max_feedback_fixes | objects | .per_pr) // 6' "$CONFIG")
+[[ $MAX_FIX_HEAD =~ ^[0-9]+$ ]] || MAX_FIX_HEAD=3
+[[ $MAX_FIX_PR =~ ^[0-9]+$ ]] || MAX_FIX_PR=6
 
 # Sources of PRs to look at. Primary: the search API (works even when on-site notifications are off),
 # one query per kind per poll, covering all configured repos (search is limited to 30 calls/min).
@@ -213,6 +220,21 @@ process_item() {
 PR #$n ($(jq -r .title <<<"$ev")): ${lc}CI is still failing after $MAX_CI_FIXES fix attempts. I stopped; this one needs you."
     fi
     settle; return 0
+  fi
+  if [ "$(jq -r .kind <<<"$ev")" = fix ] && ! grep -qxF "$key" "$HANDLED"; then
+    local nh np gk
+    read -r nh np < <(awk -F'\t' -v k="$mode|$repo|$n" -v h="$(jq -r .head <<<"$ev")" \
+      '$1 == k {p++; if ($2 == h) c++} END {print c + 0, p + 0}' "$STATE_DIR/fixes.tsv" 2>/dev/null || echo "0 0")
+    if [ "${nh:-0}" -ge "$MAX_FIX_HEAD" ] || [ "${np:-0}" -ge "$MAX_FIX_PR" ]; then
+      log "skip $repo#$n: feedback fix cap reached ($nh on this head, max $MAX_FIX_HEAD; $np on the PR, max $MAX_FIX_PR)"
+      gk="$mode|$repo#$n|$([ "${np:-0}" -ge "$MAX_FIX_PR" ] && echo pr || jq -r .head <<<"$ev")"
+      if ! grep -qxF "$gk" "$STATE_DIR/fix-gave-up.tsv" 2>/dev/null; then
+        echo "$gk" >>"$STATE_DIR/fix-gave-up.tsv"
+        report "$(jq -r .url <<<"$ev")
+PR #$n ($(jq -r .title <<<"$ev")): new review feedback keeps coming after $np feedback fixes ($nh on this commit). I stopped (max_feedback_fixes); this one needs you."
+      fi
+      settle; return 0
+    fi
   fi
   if grep -qxF "$key" "$HANDLED"; then log "already handled $key"; settle; return 0; fi
   if key_running "$key"; then log "already running $key"; return 0; fi

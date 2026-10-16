@@ -1,6 +1,7 @@
 # Decide what one PR means for us. No network: everything arrives as arguments.
 # Args: --arg me --arg reason --arg repo
 #       --argjson ignore (extra bot logins) --argjson trusted (extra trusted commenters)
+#       --argjson review_bots (bot logins whose review threads count, e.g. ["coderabbitai[bot]"])
 #       --argjson via_search (true when the review request came from the search source)
 #       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled/ci_enabled
 #       --argjson ci_local (true when config ci_source is "local": CI is ci-local's record, never check runs)
@@ -39,11 +40,14 @@ def maxid: if length == 0 then null else max_by(.id) end;
         # APPROVED review whose body is more than a bare approval phrase.
         | ([$latest[] | select(.state == "APPROVED" and ((.body // "") | gsub("\\s+"; " ") | ascii_downcase
             | test("^ ?((lgtm|looks good( to me)?|approved?|ship ?it|nice( work)?|great( work)?|thanks?( you)?)[ .!]*|:shipit:|\\+1|👍|🚀)? ?$") | not))] | maxid) as $ap
-        # Unresolved review threads, review bots (CodeRabbit) included, whose newest comment is not mine
-        # and comes from a bot or a trusted person: keyed on that comment, so a new one runs again.
-        | ([($threads[0] // [])[] | select(.resolved | not) | (.comments | last) as $l | select($l != null)
-            | $l | select(.login != $me and (.login | IN($ignore[]) | not) and ((.login | endswith("[bot]"))
-                or (.assoc | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.login | IN($trusted[]))))]
+        # Unresolved review threads that a trusted voice started (me, a trusted person, or a known review
+        # bot such as CodeRabbit: a bot can relay a stranger, so any other bot does not count) and whose
+        # newest comment is from a trusted voice other than me (my own reply last: nothing new).
+        # Keyed on that newest comment, so a new one runs again (capped per PR in poll.sh).
+        | def tvoice: .login == $me or (.login | IN($ignore[]) | not) and ((.login | IN($review_bots[]))
+            or (.login | endswith("[bot]") | not) and ((.assoc | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.login | IN($trusted[]))));
+          ([($threads[0] // [])[] | select(.resolved | not) | select((.comments | length) > 0 and (.comments[0] | tvoice))
+            | .comments | last | select(.login != $me and tvoice)]
           | if length == 0 then null else max_by(.id) | {id, user: {login}} end) as $t
         | (if $fix_enabled and ([$cr, $rc, $c, $i, $ap, $t] | any(. != null)) then [{
             kind: "fix",

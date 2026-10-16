@@ -68,7 +68,7 @@ fail() { # fail <message>: loud report; retried by the poller (max 3) unless we 
   set -- "$1${fail_extra:+.$fail_extra}"
   echo "FAILED: $1" >>"$LOG"
   if [ "$posted" = 1 ]; then
-    echo "$DKEY" >>"$STATE_DIR/handled.tsv" # a repeat could double-post
+    echo "$DKEY" >>"$STATE_DIR/handled.tsv"; note_fix # a repeat could double-post
     report "$prefix PARTLY DONE, then FAILED: $1. Not retried automatically, check the PR. Log: $LOG."
   elif [ -e "$PR_AUTOPILOT_TRANSIENT_FILE" ] && [ "$(transient_count)" -lt 5 ]; then
     # GitHub was unreachable even after gh()'s retries: not the PR's fault, so no attempt is burned and
@@ -82,8 +82,10 @@ fail() { # fail <message>: loud report; retried by the poller (max 3) unless we 
   fi
   exit 1
 }
+# A finished feedback fix, for the poller's max_feedback_fixes cap (per head and per PR).
+note_fix() { [ "$kind" != fix ] || printf '%s\t%s\n' "$mode|$repo|$n" "$head" >>"$STATE_DIR/fixes.tsv"; }
 succeed() { # succeed <outcome verified on GitHub>
-  echo "$DKEY" >>"$STATE_DIR/handled.tsv"
+  echo "$DKEY" >>"$STATE_DIR/handled.tsv"; note_fix
   if [ "$mode" = live ] && [ -n "$thread" ]; then
     gh api -X PATCH "notifications/threads/$thread" >/dev/null 2>&1 || log "could not mark $thread read"
   fi
@@ -190,6 +192,16 @@ for ep in reviews comments issue-comments; do
   esac
   gh api --paginate "$path" 2>>"$LOG" | jq -s 'add // []' >"$JOB/$ep.json" || fail "fetch $ep failed"
   [ -s "$JOB/$ep.json" ] || fail "fetch $ep returned nothing"
+  # Own PR: only trusted voices reach the model (me, owner/member/collaborator, trusted_commenters, a
+  # known review bot); a stranger's text, or a bot relaying it, never does. Not on a review of someone
+  # else's PR: there the whole PR is the untrusted input being judged.
+  if [ "$kind" != review ]; then
+    jq --arg me "$me" --argjson bots "$(review_bots)" --argjson tr "$(jq -c '.trusted_commenters // []' "$CONFIG")" \
+      --argjson ig "$(jq -c '.ignore_authors // []' "$CONFIG")" 'map(select(.user.login == $me
+        or (.user.login | IN($ig[]) | not) and ((.user.login | IN($bots[])) or (.user.login | endswith("[bot]") | not)
+          and (((.author_association // "NONE") | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.user.login | IN($tr[]))))))' \
+      "$JOB/$ep.json" >"$JOB/$ep.trusted" && mv "$JOB/$ep.trusted" "$JOB/$ep.json" || fail "could not filter $ep to trusted authors"
+  fi
 done
 # Which review threads are resolved: only GraphQL says, and a resolved thread is not an open point.
 if [ "$kind" = fix ]; then
