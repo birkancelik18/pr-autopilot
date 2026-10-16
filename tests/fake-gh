@@ -30,15 +30,16 @@ while [ $i -lt ${#args[@]} ]; do
         commit_id=*) commit_id=${f#*=} ;;
         body=*) bodyv=${f#*=} ;;
         title=*) titlev=${f#*=} ;;
+        number=*) gqln=${f#*=} ;;
       esac ;;
     --paginate | api) ;;
-    user | notifications* | repos/* | search/*) ep=$a ;;
+    user | notifications* | repos/* | search/* | graphql) ep=$a ;;
   esac
   i=$((i + 1))
 done
 if [ -n "${FAKE_GH_FAIL:-}" ] && [ "$method $ep" = "$FAKE_GH_FAIL" ]; then echo "fake gh: forced failure" >&2; exit 1; fi
 # FAKE_WRITE_502=1: every write is applied and then answered with a 502, as when a proxy drops the reply.
-if [ -n "${FAKE_WRITE_502:-}" ] && [ "$method" != GET ] && [ -z "${FAKE_IN_502:-}" ]; then
+if [ -n "${FAKE_WRITE_502:-}" ] && [ "$method" != GET ] && [ "$ep" != graphql ] && [ -z "${FAKE_IN_502:-}" ]; then
   FAKE_IN_502=1 "$0" "$@" >/dev/null 2>&1; echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1
 fi
 store() { # store <html_url>: remember a created comment/issue for later GETs
@@ -80,6 +81,8 @@ case "$method $ep" in
   "POST repos/"*/pulls/*/requested_reviewers)
     echo "POST $ep ${reviewers[*]}" >>"$W"
     printf '%s\n' "${reviewers[@]}" | jq -R '{login: .}' | jq -s . >"$S/requested.json"; echo '{}' ;;
+  "POST graphql") # review threads, in GitHub's GraphQL shape; none unless $FIX/threads-<n>.json exists
+    cat "$FIX/threads-${gqln:-0}.json" 2>/dev/null || echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
   "GET repos/"*/commits/*/check-runs*)
     if [ -n "${FAKE_CHECKS:-}" ]; then cat "$FAKE_CHECKS"; else echo '{"check_runs": []}'; fi | out ;;
   "GET repos/"*/actions/jobs/*/logs) printf 'step 1\nFAIL src/a.test.ts > expects the old label\nExpected: "A" Received: "B"\n' ;;

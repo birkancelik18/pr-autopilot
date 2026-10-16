@@ -59,6 +59,8 @@ gh() {
     prev=$a
   done
   case ${1:-} in pr) case ${2:-} in review | comment | create | edit | merge | close) write=1 ;; esac ;; esac
+  # A GraphQL query is a read even though its variables go in -f/-F fields; only a mutation writes.
+  [ "${1:-} ${2:-}" = "api graphql" ] && ! grep -q mutation <<<"$*" && write=0
   [ "$write" = 0 ] || re=$GH_REJECTED_RE
   [ -z "${PR_AUTOPILOT_TRANSIENT_FILE:-}" ] || rm -f "$PR_AUTOPILOT_TRANSIENT_FILE" # scoped to the last call
   out=$(mktemp) err=$(mktemp)
@@ -82,6 +84,18 @@ gh() {
   return "$rc"
 }
 is_paused() { [ -f "$STATE_DIR/paused" ]; }
+
+# review_threads <owner/name> <pr>: the PR's review threads (first 100, last 20 comments each) as
+# [{id, resolved, comments: [{id, login, assoc}]}]. Only GraphQL knows whether a thread is resolved.
+# A bot's login gets the "[bot]" suffix the REST API shows (coderabbitai -> coderabbitai[bot]).
+review_threads() {
+  gh api graphql -f owner="${1%%/*}" -f name="${1#*/}" -F number="$2" -f query='query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
+      id isResolved comments(last: 20) { nodes { databaseId authorAssociation author { login __typename } } } } } } } }' |
+    jq -e '[.data.repository.pullRequest.reviewThreads.nodes[] | {id, resolved: .isResolved,
+      comments: [.comments.nodes[] | {id: .databaseId, assoc: (.authorAssociation // "NONE"),
+        login: ((.author.login // "ghost") + (if .author.__typename == "Bot" then "[bot]" else "" end))}]}]'
+}
 
 # ci_source "local" (default "github"): CI is ci-local, run on this machine, not GitHub's check runs.
 # ci-local <pr> --repo <owner/name> writes one record per head commit (README, Config) and exits 0 only on pass.

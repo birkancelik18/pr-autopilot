@@ -161,7 +161,11 @@ process_item() {
     { log "ERROR $repo#$n: could not fetch PR data, will retry next poll"; return 1; }
   # CI results only matter on the user's own PRs. With ci_source local, CI is the head's ci-local
   # record (null: not run yet) and GitHub's check runs are never read.
-  echo '{"check_runs": []}' >"$tmp/checks"; echo null >"$tmp/cirec"
+  echo '{"check_runs": []}' >"$tmp/checks"; echo null >"$tmp/cirec"; echo '[]' >"$tmp/threads"
+  # Unresolved review threads only matter on the user's own PRs too (a feedback fix).
+  if [ "$(jq -r .user.login "$tmp/pr")" = "$me" ] && ! review_threads "$repo" "$n" >"$tmp/threads" 2>>"$STATE_DIR/polls.log"; then
+    log "ERROR $repo#$n: could not fetch review threads, will retry next poll"; return 1
+  fi
   if ci_local; then
     local rec; rec=$(ci_record "$repo" "$(jq -r .head.sha "$tmp/pr")")
     if [ -s "$rec" ] && ! jq -e 'select(type == "object")' "$rec" >"$tmp/cirec" 2>/dev/null; then
@@ -173,7 +177,7 @@ process_item() {
   fi
   ev=$(jq -n -c -f "$DIR/classify.jq" --arg me "$me" --arg reason "$reason" --arg repo "$repo" \
     --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
-    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks" --slurpfile cirec "$tmp/cirec") ||
+    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks" --slurpfile cirec "$tmp/cirec" --slurpfile threads "$tmp/threads") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
   # What failed.tsv pruning below may keep for this PR: only the keys of its current state. A skip
   # (draft, nothing to address) says nothing about a failure, except closed or merged.

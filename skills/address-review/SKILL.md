@@ -15,13 +15,13 @@ You are fixing review feedback on the user's own PR. Arguments: $ARGUMENTS
 
 ## Files you get
 
-In `job_dir`: `pr.json`, `diff.patch`, `reviews.json`, `comments.json` (inline review comments; `in_reply_to_id` links replies into threads), `issue-comments.json`, and `conventions/` (the base branch's AGENTS.md, CLAUDE.md and `.claude/rules` as `.txt` reference files; follow them when you edit).
+In `job_dir`: `pr.json`, `diff.patch`, `reviews.json`, `comments.json` (inline review comments; `in_reply_to_id` links replies into threads), `issue-comments.json`, `threads.json` (each review thread: `resolved` true or false, and its comments' `id`s, which match `comments.json`), and `conventions/` (the base branch's AGENTS.md, CLAUDE.md and `.claude/rules` as `.txt` reference files; follow them when you edit).
 
 `<job_dir>/voice.md` says how anything that gets posted under the user's name must read. Read it before you write anything that will be posted, and follow it.
 
 ## 1. Collect open feedback
 
-A point is open when it comes from someone other than `me` (the PR author) and no later reply from the PR author is in its thread, or it is the body of a CHANGES_REQUESTED review (take each reviewer's latest review) or a top-level comment that no later reply answers. Ignore pure thanks and praise, and bot status chatter.
+A point is open when it comes from someone other than `me` (the PR author) and no later reply from the PR author is in its thread, or it is the body of a CHANGES_REQUESTED review (take each reviewer's latest review) or a top-level comment that no later reply answers. An APPROVED review can still carry open points ("lgtm with comments", a numbered list): each point in its body is open too. A review bot's inline comment (CodeRabbit and the like) is open like a person's; weigh it on its merits. A thread that `threads.json` marks resolved is closed, whoever wrote it. Ignore pure thanks and praise, and bot status chatter.
 
 ## 2. Triage
 

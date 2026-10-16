@@ -4,6 +4,8 @@
 #       --argjson via_search (true when the review request came from the search source)
 #       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled/ci_enabled
 #       --argjson ci_local (true when config ci_source is "local": CI is ci-local's record, never check runs)
+#       --slurpfile threads (review_threads in lib.sh: [{id, resolved, comments: [{id, login, assoc}]}],
+#       [] when not fetched)
 #       --slurpfile pr/reviews/comments/issue/checks/cirec (each file holds one JSON value; checks is the
 #       head commit's check-runs response, {"check_runs": []} when not fetched; cirec is the head's
 #       ci-local record, null when there is none or ci_source is not local).
@@ -33,11 +35,23 @@ def maxid: if length == 0 then null else max_by(.id) end;
         | ([$rv[] | human | select(trusted) | select(.state == "COMMENTED" and ((.body // "") != ""))] | maxid) as $rc
         | ([$cm[] | human | select(trusted)] | maxid) as $c
         | ([$ic[] | human | select(trusted)] | maxid) as $i
-        | (if $fix_enabled and ([$cr, $rc, $c, $i] | any(. != null)) then [{
+        # An approval can still carry open points ("lgtm with comments", a numbered list): a latest
+        # APPROVED review whose body is more than a bare approval phrase.
+        | ([$latest[] | select(.state == "APPROVED" and ((.body // "") | gsub("\\s+"; " ") | ascii_downcase
+            | test("^ ?((lgtm|looks good( to me)?|approved?|ship ?it|nice( work)?|great( work)?|thanks?( you)?)[ .!]*|:shipit:|\\+1|👍|🚀)? ?$") | not))] | maxid) as $ap
+        # Unresolved review threads, review bots (CodeRabbit) included, whose newest comment is not mine
+        # and comes from a bot or a trusted person: keyed on that comment, so a new one runs again.
+        | ([($threads[0] // [])[] | select(.resolved | not) | (.comments | last) as $l | select($l != null)
+            | $l | select(.login != $me and (.login | IN($ignore[]) | not) and ((.login | endswith("[bot]"))
+                or (.assoc | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.login | IN($trusted[]))))]
+          | if length == 0 then null else max_by(.id) | {id, user: {login}} end) as $t
+        | (if $fix_enabled and ([$cr, $rc, $c, $i, $ap, $t] | any(. != null)) then [{
             kind: "fix",
-            key: "fix|\($repo)|\($p.number)|r\($cr.id // 0)-v\($rc.id // 0)-c\($c.id // 0)-i\($i.id // 0)",
+            # -a/-t only when present: keys of PRs without them stay what they were (no replay).
+            key: ("fix|\($repo)|\($p.number)|r\($cr.id // 0)-v\($rc.id // 0)-c\($c.id // 0)-i\($i.id // 0)"
+              + (if $ap then "-a\($ap.id)" else "" end) + (if $t then "-t\($t.id)" else "" end)),
             cr: ($cr != null),
-            who: ([$cr, $rc, $c, $i] | map(select(. != null) | .user.login) | unique | join(", "))
+            who: ([$cr, $rc, $c, $i, $ap, $t] | map(select(. != null) | .user.login) | unique | join(", "))
           }] else [] end) as $fixes
         # Merge conflict: GitHub says "dirty"; keyed on both shas, so a new conflict is a new job.
         | ($conflict_enabled and ($p.mergeable_state // "") == "dirty") as $dirty

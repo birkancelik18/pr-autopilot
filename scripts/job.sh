@@ -191,6 +191,10 @@ for ep in reviews comments issue-comments; do
   gh api --paginate "$path" 2>>"$LOG" | jq -s 'add // []' >"$JOB/$ep.json" || fail "fetch $ep failed"
   [ -s "$JOB/$ep.json" ] || fail "fetch $ep returned nothing"
 done
+# Which review threads are resolved: only GraphQL says, and a resolved thread is not an open point.
+if [ "$kind" = fix ]; then
+  review_threads "$repo" "$n" >"$JOB/threads.json" 2>>"$LOG" || fail "fetch review threads failed"
+fi
 
 # --- checkout of the PR head without the repo's agent config (it is untrusted)
 git_net -C "$clone" fetch -q origin "+pull/$n/head:$REF" "+refs/heads/$base:$BASEREF" >>"$LOG" 2>&1 ||
@@ -555,12 +559,13 @@ finish_fix() {
       and (.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))))' "$r" >/dev/null ||
     fail "result.json is malformed or replies to a comment id that does not exist"
 
-  # Reply cap: at most one per open human comment, never more than 20.
+  # Reply cap: at most one per open comment (human, or a review bot's inline comment), never more than 20.
   local cap
   cap=$(jq -n --arg me "$me" --slurpfile c "$JOB/comments.json" --slurpfile i "$JOB/issue-comments.json" \
-    --slurpfile v "$JOB/reviews.json" '[$c[0][], $i[0][], ($v[0][] | select((.body // "") != ""))]
-    | map(select(.user.login != $me and (.user.login | endswith("[bot]") | not))) | length | if . > 20 then 20 else . end')
-  [ "$(jq '.replies | length' "$r")" -le "$cap" ] || fail "result.json has $(jq '.replies | length' "$r") replies but there are only $cap open human comments (cap)"
+    --slurpfile v "$JOB/reviews.json" '[($c[0][] | select(.user.login != $me)),
+      ([$i[0][], ($v[0][] | select((.body // "") != ""))][] | select(.user.login != $me and (.user.login | endswith("[bot]") | not)))]
+    | length | if . > 20 then 20 else . end')
+  [ "$(jq '.replies | length' "$r")" -le "$cap" ] || fail "result.json has $(jq '.replies | length' "$r") replies but there are only $cap open comments (cap)"
 
   # Only the files the model lists are committed, never `git add -A`.
   local dirty changed summary msg newsha files=() f

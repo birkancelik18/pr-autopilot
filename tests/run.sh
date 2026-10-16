@@ -178,6 +178,19 @@ FAKE_CILOCAL=incomplete FAKE_CILOCAL_SHA=hhh777 "$W/bin/ci-local" 18 --repo acme
 check "after 3 CI fixes: no 4th, the owner is told once that local CI is still failing" "0 1" "$(newjobs | grep -c '"cifix","acme/app",18') $(grep -c 'PR #18 .*local CI is still failing after 3 fix attempts' "$S/notified")"
 cp "$T/fixtures/pr-18.json" "$FIX/pr-18.json"; rm -rf "$DAVID_STATE"; mkcfg true
 
+echo "== poller: an unresolved CodeRabbit thread on my approved PR starts the feedback fix"
+: >"$S/handled.tsv"; : >"$S/seen.tsv"; : >"$S/failed.tsv"; bump 18
+cat >"$FIX/threads-18.json" <<'J'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+ {"id":"T9","isResolved":false,"comments":{"nodes":[{"databaseId":8101,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
+J
+n0=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
+check "fix job for #18 keyed on the thread's newest comment" 1 "$(newjobs | grep -c '"fix","acme/app",18,"hhh888",true,"fix|acme/app|18|r0-v0-c[0-9]*-i0-t8101"\]')"
+n0=$(jobs_n); FAKE_NOTIF_EMPTY=1 poll
+check "handled: the same thread does not start it again" 0 "$(newjobs | grep -c '"fix","acme/app",18')"
+rm -f "$FIX/threads-18.json"; bump 18; n0=$(jobs_n); FAKE_GH_FAIL="POST graphql" FAKE_NOTIF_EMPTY=1 poll
+check "threads cannot be read: own PRs wait for the next poll, nothing starts" "0 1" "$(newjobs | grep -c ',18,') $([ "$(plog 'acme/app#18: could not fetch review threads')" -ge 1 ] && echo 1)"
+
 echo "== scheduler files keep jobs alive after poll.sh exits"
 plist=$(bash "$T/../scripts/install-scheduler.sh" print-plist); unit=$(bash "$T/../scripts/install-scheduler.sh" print-unit)
 check "launchd plist has AbandonProcessGroup=true" 1 "$(grep -c '<key>AbandonProcessGroup</key><true/>' <<<"$plist")"
@@ -347,6 +360,10 @@ check "review: POST answered 502 but applied: read back, exactly one review, suc
   check "gh() classifies a lowercase -X post as a write: no retry on 502" "1 1" "$rc $(cat "$S/fake/flaky")"
   rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api repos/acme/app/pulls/11 >/dev/null 2>&1; rc=$?
   check "gh() still retries a read on a 502-class error" "0 2" "$rc $(cat "$S/fake/flaky")"
+  rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api graphql -F number=1 -f query='query { viewer { login } }' >/dev/null 2>&1; rc=$?
+  check "gh() treats a GraphQL query as a read (its -f fields are variables): retried on a 502" "0 2" "$rc $(cat "$S/fake/flaky")"
+  rm -f "$S/fake/flaky"; FAKE_GH_FLAKY=2 gh api graphql -f query='mutation { x }' >/dev/null 2>&1; rc=$?
+  check "but a GraphQL mutation is a write: not retried" "1 1" "$rc $(cat "$S/fake/flaky")"
   echo "$pass $fail" >"$W/counts"
 )
 read -r pass fail <"$W/counts"
@@ -592,7 +609,20 @@ check "fix allow list has no Bash at all (default)" 0 "$(allow | grep -c Bash)"
 new=$(git -C "$O" rev-parse refs/heads/feature-11)
 check "only the file listed in result.json is committed, never git add -A" "src/a.txt" "$(git -C "$O" diff --name-only "$SHA" "$new")"
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-many job
-check "more replies than open human comments is refused before any write" "1 0" "$(grep -c 'only 1 open human comments' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+check "more replies than open human comments is refused before any write" "1 0" "$(grep -c 'only 1 open comments (cap)' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+echo "-- fix: review threads are handed over with their resolved state; a review bot's comment may get a reply"
+cat >"$FIX/threads-11.json" <<'J'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+ {"id":"T1","isResolved":false,"comments":{"nodes":[{"databaseId":5001,"authorAssociation":"MEMBER","author":{"login":"bob","__typename":"User"}}]}},
+ {"id":"T2","isResolved":true,"comments":{"nodes":[{"databaseId":5009,"authorAssociation":"NONE","author":{"login":"coderabbitai","__typename":"Bot"}}]}}]}}}}}
+J
+cp "$FIX/comments-11.json" "$W/comments-11.bak"
+jq '. + [{"id": 5009, "user": {"login": "coderabbitai[bot]"}, "body": "Guard against an empty list.", "author_association": "NONE"}]' "$W/comments-11.bak" >"$FIX/comments-11.json"
+reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-many job
+check "threads.json: each thread's resolved state, a bot's login as REST shows it" '[["T1",false,5001,"bob"],["T2",true,5009,"coderabbitai[bot]"]]' \
+  "$(jq -c 'map([.id, .resolved, .comments[0].id, .comments[0].login])' "$(cat "$S/claude.jobdir")/threads.json")"
+check "a CodeRabbit inline comment counts toward the reply cap: two replies are posted" "0 2" "$(grep -c 'open comments (cap)' "$S/notified") $(nwrites 'replies body=')"
+cp "$W/comments-11.bak" "$FIX/comments-11.json"; rm -f "$FIX/threads-11.json"
 cp "$PR_AUTOPILOT_CONFIG" "$W/cfg.bak"
 optin() { jq --argjson c "$1" '. + {run_local_tests_UNSAFE: {"acme/app": $c}}' "$W/cfg.bak" >"$PR_AUTOPILOT_CONFIG"; }
 reset_fix; optin '["ls"]'; ev fix true; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
@@ -618,7 +648,7 @@ cls() { # cls <pr> <reviews> <comments> <issue> <reason> <via_search>
   jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason "$5" --arg repo acme/app --argjson ignore '[]' \
     --argjson trusted "${TRUSTED:-[]}" --argjson via_search "$6" --argjson allow_forks false --argjson review_enabled true \
     --argjson fix_enabled true --argjson conflict_enabled "${CONFLICT:-true}" --argjson ci_enabled "${CI_ON:-true}" --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4" --slurpfile checks "${CHECKS:-$W/nochecks.json}" \
-    --argjson ci_local "${CILOCAL_ON:-false}" --slurpfile cirec "${CIREC:-$W/null.json}"
+    --argjson ci_local "${CILOCAL_ON:-false}" --slurpfile cirec "${CIREC:-$W/null.json}" --slurpfile threads "${THREADS:-$W/empty.json}"
 }
 echo '[]' >"$W/empty.json"; echo null >"$W/null.json"
 echo '{"check_runs": []}' >"$W/nochecks.json"
@@ -656,6 +686,35 @@ echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"plea
 check "feedback, conflict and red CI: steps in that order" "fix conflict cifix" "$(CHECKS=$W/ck-red.json cls "$W/pr-dirty.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r '[.steps[].kind] | join(" ")')"
 echo '[{"id":9,"user":{"login":"rando"},"author_association":"NONE","body":"x"}]' >"$W/c.json"
 check "trusted_commenters can vouch for an outsider" fix "$(TRUSTED='["rando"]' cls "$FIX/pr-18.json" "$W/empty.json" "$W/c.json" "$W/empty.json" author true | jq -r .kind)"
+echo "-- an approval with open points, or an unresolved review thread, still starts a fix"
+ap() { # ap <body> [association]: one APPROVED review by pal, classified on own PR #18
+  jq -n --arg b "$1" --arg a "${2:-MEMBER}" '[{id: 950, state: "APPROVED", user: {login: "pal"}, author_association: $a, body: $b}]' >"$W/ap.json"
+  cls "$FIX/pr-18.json" "$W/ap.json" "$W/empty.json" "$W/empty.json" author true | jq -r '.key // .skip'
+}
+check "APPROVED 'lgtm with comments' and a numbered list: a fix keyed on the review id" "fix|acme/app|18|r0-v0-c0-i0-a950 fix|acme/app|18|r0-v0-c0-i0-a950" \
+  "$(ap 'lgtm with comments') $(ap "$(printf 'Approving.\n1. rename x\n2. add a test')")"
+check "a bare approval (LGTM!, Looks good to me, thumbs up, empty) is not feedback" "nothing to address|nothing to address|nothing to address|nothing to address" \
+  "$(ap 'LGTM!')|$(ap ' Looks good to me. ')|$(ap '👍')|$(ap '')"
+check "an approval with comments from an untrusted author starts nothing" "nothing to address" "$(ap 'lgtm, but rename x' NONE)"
+jq -n '[{id: 940, state: "CHANGES_REQUESTED", user: {login: "pal"}, author_association: "MEMBER", body: "fix x"},
+  {id: 950, state: "APPROVED", user: {login: "pal"}, author_association: "MEMBER", body: "ok now, one nit: rename y"}]' >"$W/ap2.json"
+check "a later approval with comments replaces the changes request: keyed on the approval" "fix|acme/app|18|r0-v0-c0-i0-a950" \
+  "$(cls "$FIX/pr-18.json" "$W/ap2.json" "$W/empty.json" "$W/empty.json" author true | jq -r .key)"
+th() { # th <resolved> <comments json array>: one review thread on own PR #18, classified
+  jq -n --argjson r "$1" --argjson c "$2" '[{id: "T1", resolved: $r, comments: $c}]' >"$W/th.json"
+  THREADS=$W/th.json cls "$FIX/pr-18.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" author true | jq -r '.key // .skip'
+}
+bot='{"id": 8001, "login": "coderabbitai[bot]", "assoc": "NONE"}'
+check "an unresolved CodeRabbit thread: a fix keyed on its newest comment" "fix|acme/app|18|r0-v0-c0-i0-t8001" "$(th false "[$bot]")"
+pal='{"id": 8007, "login": "pal", "assoc": "MEMBER"}' mine='{"id": 8002, "login": "me", "assoc": "OWNER"}' rando='{"id": 8003, "login": "rando", "assoc": "NONE"}'
+check "a new comment in it is a new key, so it runs once more" "fix|acme/app|18|r0-v0-c0-i0-t8007" "$(th false "[$bot, $pal]")"
+check "resolved, answered by me last, or last word from an untrusted author: nothing" "nothing to address|nothing to address|nothing to address" \
+  "$(th true "[$bot]")|$(th false "[$bot, $mine]")|$(th false "[$rando]")"
+check "a bot listed in ignore_authors is still ignored" "nothing to address" "$(jq -n --argjson c "[$bot]" '[{id: "T1", resolved: false, comments: $c}]' >"$W/th.json"
+  jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason author --arg repo acme/app --argjson ignore '["coderabbitai[bot]"]' --argjson trusted '[]' --argjson via_search true \
+    --argjson allow_forks false --argjson review_enabled true --argjson fix_enabled true --argjson conflict_enabled true --argjson ci_enabled true --argjson ci_local false \
+    --slurpfile pr "$FIX/pr-18.json" --slurpfile reviews "$W/empty.json" --slurpfile comments "$W/empty.json" --slurpfile issue "$W/empty.json" \
+    --slurpfile checks "$W/nochecks.json" --slurpfile cirec "$W/null.json" --slurpfile threads "$W/th.json" | jq -r .skip)"
 jq '.requested_reviewers = []' "$FIX/pr-11.json" >"$W/pr-stale.json"
 check "S2: stale review_requested notification (I am not requested any more): skipped" "not a current requested reviewer (stale notification)" \
   "$(cls "$W/pr-stale.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested false | jq -r .skip)"
