@@ -66,6 +66,7 @@ flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson conflict_enabled "$(cfgd conflict_enabled true)"
   --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
   --argjson ci_local "$(ci_local && echo true || echo false)"
+  --argjson ci_container "$([ -n "$(ci_container)" ] && echo true || echo false)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")"
   --argjson review_bots "$(review_bots)")

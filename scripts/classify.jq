@@ -5,6 +5,7 @@
 #       --argjson via_search (true when the review request came from the search source)
 #       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled/ci_enabled
 #       --argjson ci_local (true when config ci_source is "local": CI is ci-local's record, never check runs)
+#       --argjson ci_container (true when config ci_container is set: the only way a teammate's PR gets local CI)
 #       --slurpfile threads (review_threads in lib.sh: [{id, resolved, comments: [{id, login, assoc}]}],
 #       [] when not fetched)
 #       --slurpfile pr/reviews/comments/issue/checks/cirec (each file holds one JSON value; checks is the
@@ -83,8 +84,9 @@ def maxid: if length == 0 then null else max_by(.id) end;
       elif ([$rv[] | select(.user.login == $me and .commit_id == $p.head.sha
           and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | length) > 0 then
         {skip: "already reviewed this head"}
-      # Local CI: ci-local runs on the head first; the review's verdict depends on its record (job.sh).
-      elif $ci_local and $rec == null then {kind: "cilocal", key: $lkey, who: $p.user.login}
+      # Local CI: it runs on the head first, and the review's verdict depends on its record (job.sh). A
+      # teammate's code never runs on this Mac: only in the ci_container runner; without one, no local CI.
+      elif $ci_local and $ci_container and $rec == null then {kind: "cilocal", key: $lkey, who: $p.user.login}
       else {kind: "review", key: "review|\($repo)|\($p.number)|\($p.head.sha)", who: $p.user.login}
       end
     else {skip: "not actionable (reason: \($reason))"}

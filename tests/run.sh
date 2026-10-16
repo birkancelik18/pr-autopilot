@@ -11,6 +11,8 @@ check() { # check <name> <expected> <actual>
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"; cp "$T/fake-ci-local" "$W/bin/ci-local"
+# A stand-in container runner: logs that it ran, then behaves like ci-local (same record).
+printf '#!/usr/bin/env bash\necho "container $*" >>"$PR_AUTOPILOT_STATE/container.calls"\nexec "$(dirname "$0")/ci-local" "$@"\n' >"$W/bin/ci-container"
 # ci_source local: the stub ci-local, and its records under a throwaway DAVID_STATE (never the real one).
 export PR_AUTOPILOT_CI_LOCAL=$W/bin/ci-local DAVID_STATE=$W/david
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
@@ -238,8 +240,9 @@ ev() { # ev <kind> <dry_run> [head]
   [ "$1" = conflict ] && { key="conflict|acme/app|11|${3:-$SHA}|base"; who="the base branch"; }
   [ "$1" = cilocal ] && { key="cilocal|acme/app|11|${3:-$SHA}"; who="local CI"; }
   jq -n --arg k "$1" --argjson d "$2" --arg a "${ASSOC:-MEMBER}" --arg h "${3:-$SHA}" --arg key "$key" --arg who "$who" --argjson cr "$cr" \
+    --arg au "${AUTHOR:-me}" \
     '{kind:$k, key:$key, repo:"acme/app", number:11, head:$h, branch:"feature-11", base:"main",
-      title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d}' >"$W/ev.json"
+      title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d, author:$au}' >"$W/ev.json"
 }
 job() { bash "$T/../scripts/job.sh" "$W/ev.json"; }
 reset() { rm -rf "$S/logs" "$S/fake" "$S/writes.log" "$S/handled.tsv" "$S/failed.tsv" "$S/notified" "$S/claude."*; }
@@ -600,7 +603,17 @@ check "incomplete is a CI fix too; flaky: no GitHub job is re-run, nothing pushe
   "$(jq -r '.[0].conclusion' "$(cat "$S/claude.jobdir")/ci/failed.json") $(cat "$S/writes.log" 2>/dev/null | grep -c rerun) $(git -C "$O" rev-parse feature-11) $(grep -c 'not caused by the code (the runner lost its network). Nothing is re-run; this one needs you' "$S/notified")"
 lrec pass; reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-fix job
 check "the record says pass: quiet skip although GitHub's checks are red" "0 $SHA" "$(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $(git -C "$O" rev-parse feature-11)"
-echo "-- local CI decides whether a review on someone else's PR may APPROVE"
+echo "-- a teammate's PR code never runs on this Mac: only through ci_container"
+rm -rf "$DAVID_STATE"; rm -f "$S/ci-local.calls" "$S/container.calls"; reset; AUTHOR=alice ev cilocal false; FAKE_CILOCAL=pass FAKE_CILOCAL_SHA=$SHA job
+check "ci_container unset: a teammate's PR gets no local CI at all, loudly" "0 1" \
+  "$(cat "$S/ci-local.calls" 2>/dev/null | wc -l | tr -d ' ') $(grep -c "local CI not run on alice's PR: their code never runs on this Mac outside a container, and ci_container is not set" "$S/notified")"
+jq --arg c "$W/bin/ci-container" '. + {ci_source: "local", ci_container: $c}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+reset; AUTHOR=alice ev cilocal false; FAKE_CILOCAL=pass FAKE_CILOCAL_SHA=$SHA job
+check "ci_container set: the teammate's PR runs through it, never ci-local directly" "container 11 --repo acme/app 1" \
+  "$(cat "$S/container.calls") $(grep -c 'local CI passed on #11' "$S/notified")"
+rm -rf "$DAVID_STATE"; rm -f "$S/ci-local.calls" "$S/container.calls"; reset; ev cilocal false; FAKE_CILOCAL=pass FAKE_CILOCAL_SHA=$SHA job
+check "my own PR still runs ci-local itself, not the container" "11 --repo acme/app 0" "$(cat "$S/ci-local.calls") $(cat "$S/container.calls" 2>/dev/null | wc -l | tr -d ' ')"
+echo "-- with a container runner, local CI decides whether a review on someone else's PR may APPROVE"
 lrec pass; reset; ev review false; FAKE_CLAUDE=review job
 check "record pass and a clean review: APPROVE is posted" 1 "$(grep -c "event=APPROVE commit_id=$SHA" "$S/writes.log")"
 lrec fail; printf '```\nhi @everyone\n' >>"$DAVID_STATE/ci-local/logs/test.log"; reset; ev review false; FAKE_CLAUDE=review job
@@ -616,6 +629,14 @@ check "record incomplete and a code blocker: REQUEST_CHANGES with the blocker an
   "$(grep -c 'event=REQUEST_CHANGES' "$S/writes.log") $(grep -c '^src/a.txt:2 drops the null check' "$jd/body.safe.md") $(grep -c 'test (skipped: docker is not installed)' "$jd/body.safe.md")"
 rm -rf "$DAVID_STATE"; reset; ev review false; FAKE_CLAUDE=review job
 check "no record for the head: fails loudly, posts nothing" "1 0" "$(grep -c 'FAILED (attempt 1 of 3): no local CI record for' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
+echo "-- without a container runner, a teammate review is as before and says local CI did not run"
+jq '. + {ci_source: "local"}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+lrec fail; rm -f "$S/ci-local.calls"; reset; ev review false; FAKE_CLAUDE=review job
+jd=$(cat "$S/claude.jobdir")
+check "a failing record is not consulted: APPROVE is posted as before, local CI is not run" "1 0" "$(grep -c "event=APPROVE commit_id=$SHA" "$S/writes.log") $(cat "$S/ci-local.calls" 2>/dev/null | wc -l | tr -d ' ')"
+check "and the review says local CI was not run" "1 0" "$(grep -cx 'local CI not run: container runner not set up yet' "$jd/body.safe.md") $(grep -c 'Local CI failed' "$jd/body.safe.md")"
+rm -rf "$DAVID_STATE"; reset; ev review false; FAKE_CLAUDE=review-rc job
+check "no record needed: a code blocker still posts REQUEST_CHANGES" 1 "$(grep -c 'event=REQUEST_CHANGES' "$S/writes.log")"
 cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"; rm -rf "$DAVID_STATE"
 
 echo "== safety: fix job has no shell, commits only listed files"
@@ -671,7 +692,7 @@ cls() { # cls <pr> <reviews> <comments> <issue> <reason> <via_search>
     --argjson trusted "${TRUSTED:-[]}" --argjson via_search "$6" --argjson allow_forks false --argjson review_enabled true \
     --argjson fix_enabled true --argjson conflict_enabled "${CONFLICT:-true}" --argjson ci_enabled "${CI_ON:-true}" --slurpfile pr "$1" --slurpfile reviews "$2" --slurpfile comments "$3" --slurpfile issue "$4" --slurpfile checks "${CHECKS:-$W/nochecks.json}" \
     --argjson ci_local "${CILOCAL_ON:-false}" --slurpfile cirec "${CIREC:-$W/null.json}" --slurpfile threads "${THREADS:-$W/empty.json}" \
-    --argjson review_bots "${RBOTS:-$RB_DEFAULT}"
+    --argjson review_bots "${RBOTS:-$RB_DEFAULT}" --argjson ci_container "${CICONT:-false}"
 }
 echo '[]' >"$W/empty.json"; echo null >"$W/null.json"
 echo '{"check_runs": []}' >"$W/nochecks.json"
@@ -701,8 +722,10 @@ check "local CI record fail or incomplete: a CI fix keyed on the head; pass: not
   "$(CIREC=$W/rec-fail.json lcls "$FIX/pr-18.json" | jq -r .key) $(CIREC=$W/rec-incomplete.json lcls "$FIX/pr-18.json" | jq -r .key) $(CIREC=$W/rec-pass.json lcls "$FIX/pr-18.json" | jq -r .skip)"
 echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
 check "local CI: feedback, conflict, then ci-local" "fix conflict cilocal" "$(lcls "$W/pr-dirty.json" "$W/c.json" | jq -r '[.steps[].kind] | join(" ")')"
-check "local CI, review requested, no record: ci-local runs on that head first" "cilocal cilocal|acme/app|11|$SHA" \
-  "$(CILOCAL_ON=true cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r '"\(.kind) \(.key)"')"
+check "local CI with a container runner, review requested, no record: local CI runs on that head first" "cilocal cilocal|acme/app|11|$SHA" \
+  "$(CICONT=true CILOCAL_ON=true cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r '"\(.kind) \(.key)"')"
+check "local CI without a container runner: a teammate's PR is reviewed straight away, no local CI" review \
+  "$(CILOCAL_ON=true cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r .kind)"
 check "local CI, review requested, a record of any result: the review" "review review" \
   "$(for r in pass fail; do CILOCAL_ON=true CIREC=$W/rec-$r.json cls "$FIX/pr-11.json" "$W/empty.json" "$W/empty.json" "$W/empty.json" review_requested true | jq -r .kind; done | paste -sd' ' -)"
 echo '[{"id":9,"user":{"login":"pal"},"author_association":"MEMBER","body":"please add x"}]' >"$W/c.json"
@@ -740,7 +763,7 @@ check "a thread started by a bot that is not a known review bot starts nothing" 
 check "review_bots in config adds a bot" "fix|acme/app|18|r0-v0-c0-i0-t8001" "$(RBOTS='["coderabbitai[bot]","dependabot[bot]"]' th false "[$other, $bot]")"
 check "CodeRabbit answers my reply: a new key (the poller's max_feedback_fixes cap bounds this loop)" "fix|acme/app|18|r0-v0-c0-i0-t8009" "$(th false "[$bot, $mine, $bot2]")"
 check "a bot listed in ignore_authors is still ignored" "nothing to address" "$(jq -n --argjson c "[$bot]" '[{id: "T1", resolved: false, comments: $c}]' >"$W/th.json"
-  jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason author --arg repo acme/app --argjson ignore '["coderabbitai[bot]"]' --argjson trusted '[]' --argjson via_search true --argjson review_bots "$RB_DEFAULT" \
+  jq -n -c -f "$T/../scripts/classify.jq" --arg me me --arg reason author --arg repo acme/app --argjson ignore '["coderabbitai[bot]"]' --argjson trusted '[]' --argjson via_search true --argjson review_bots "$RB_DEFAULT" --argjson ci_container false \
     --argjson allow_forks false --argjson review_enabled true --argjson fix_enabled true --argjson conflict_enabled true --argjson ci_enabled true --argjson ci_local false \
     --slurpfile pr "$FIX/pr-18.json" --slurpfile reviews "$W/empty.json" --slurpfile comments "$W/empty.json" --slurpfile issue "$W/empty.json" \
     --slurpfile checks "$W/nochecks.json" --slurpfile cirec "$W/null.json" --slurpfile threads "$W/th.json" | jq -r .skip)"

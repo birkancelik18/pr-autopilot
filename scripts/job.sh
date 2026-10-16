@@ -140,11 +140,18 @@ if [ "$kind" = cilocal ]; then
   check_head
   rec=$(ci_record "$repo" "$head") rc=0
   ci_tmo=$(cfgd ci_timeout_minutes 90)
+  # ci-local runs only my own PRs' code here. A teammate's PR code never runs on this Mac: only
+  # through the ci_container runner (config), and with none set, not at all.
+  runner=$CI_LOCAL
+  if [ "$(g '.author // ""')" != "$me" ]; then
+    runner=$(ci_container)
+    [ -n "$runner" ] || fail "local CI not run on $(g '.author // "?"')'s PR: their code never runs on this Mac outside a container, and ci_container is not set"
+  fi
   if [ ! -s "$rec" ]; then
-    [ -x "$CI_LOCAL" ] || fail "ci_source is local but $CI_LOCAL is not an executable"
-    echo "running: $CI_LOCAL $n --repo $repo (timeout ${ci_tmo}m)" >>"$LOG"
+    [ -x "$runner" ] || fail "ci_source is local but $runner is not an executable"
+    echo "running: $runner $n --repo $repo (timeout ${ci_tmo}m)" >>"$LOG"
     set -m
-    with_timeout $((ci_tmo * 60)) "$CI_LOCAL" "$n" --repo "$repo" >>"$LOG" 2>&1 </dev/null &
+    with_timeout $((ci_tmo * 60)) "$runner" "$n" --repo "$repo" >>"$LOG" 2>&1 </dev/null &
     cpid=$!
     set +m
     wait "$cpid"; rc=$?; cpid=""
@@ -476,7 +483,11 @@ finish_review() {
   why=$(head -1 "$JOB/body.md" | cut -c1-160)
   # Local CI: APPROVE only when this head's ci-local record is pass. Otherwise REQUEST_CHANGES (a
   # COMMENT when the code review found nothing), naming the failing jobs with the tail of their logs.
-  if ci_local; then
+  # Only with a container runner: a teammate's code never runs on this Mac, so without ci_container the
+  # review is what it was before local CI, and says local CI did not run.
+  if ci_local && [ -z "$(ci_container)" ]; then
+    printf '\nlocal CI not run: container runner not set up yet\n' >>"$JOB/body.md"
+  elif ci_local; then
     local rec; rec=$(ci_record "$repo" "$head")
     [ -s "$rec" ] || fail "no local CI record for ${head:0:8} (the poller runs ci-local before the review)"
     if [ "$(jq -r --arg h "$head" 'if .sha == $h then .result else "for another commit" end' "$rec" 2>/dev/null)" != pass ]; then

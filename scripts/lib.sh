@@ -103,6 +103,9 @@ review_threads() {
 # ci-local <pr> --repo <owner/name> writes one record per head commit (README, Config) and exits 0 only on pass.
 CI_LOCAL=${PR_AUTOPILOT_CI_LOCAL:-$HOME/david/bin/ci-local}
 ci_local() { [ "$(cfg '.ci_source // "github"' 2>/dev/null)" = local ]; }
+# A teammate's PR code never runs on this Mac: their local CI runs only through config ci_container, an
+# executable called like ci-local (<pr> --repo <owner/name>, same record). Empty when unset.
+ci_container() { local c; c=$(cfg '(.ci_container | strings) // ""' 2>/dev/null); printf '%s' "${c/#\~/$HOME}"; }
 ci_record() { printf '%s/ci-local/%s/%s.json' "${DAVID_STATE:-$HOME/david/state}" "${1//\//__}" "$2"; } # <owner/name> <sha>
 # ci_summary <record>: one line, "local CI passed on #N (sha8), jobs: a, b" or "local CI failed on #N (sha8): x (exit 1)".
 ci_summary() {
