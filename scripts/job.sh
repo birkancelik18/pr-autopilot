@@ -161,6 +161,11 @@ if [ "$kind" = cilocal ]; then
   fi
   if [ ! -s "$rec" ]; then
     [ -x "$runner" ] || fail "ci_source is local but $runner is not an executable"
+    # The commits checked above are of $head; ci-local checks out whatever the head is now. Re-check
+    # right before launch so a push in between is skipped, not run unchecked.
+    # ponytail: a push can still land between this read and ci-local's fetch; pass --expect-sha "$head"
+    # once ci-local supports it.
+    check_head
     echo "running: $runner $n --repo $repo (timeout ${ci_tmo}m)" >>"$LOG"
     set -m
     with_timeout $((ci_tmo * 60)) "$runner" "$n" --repo "$repo" >>"$LOG" 2>&1 </dev/null &
@@ -215,12 +220,15 @@ for ep in reviews comments issue-comments; do
   # text never does, and neither does a whole review thread a stranger started (a review bot or anyone
   # answering in it would relay them). A thread's root is in_reply_to_id (GitHub points every reply at
   # it); a root not in the list counts as untrusted. Not on a review of someone else's PR: there the
-  # whole PR is the untrusted input being judged.
+  # whole PR is the untrusted input being judged. A top-level PR comment (issue-comments) has no thread
+  # to judge, so a review bot's is dropped there: it could be answering a stranger. Bot findings reach
+  # the model through review threads only, as the trigger (classify.jq) counts them.
   if [ "$kind" != review ]; then
-    jq -L "$DIR" --arg me "$me" --argjson bots "$(review_bots)" --argjson tr "$(jq -c '.trusted_commenters // []' "$CONFIG")" \
+    jq -L "$DIR" --arg me "$me" --arg ep "$ep" --argjson bots "$(review_bots)" --argjson tr "$(jq -c '.trusted_commenters // []' "$CONFIG")" \
       --argjson ig "$(jq -c '.ignore_authors // []' "$CONFIG")" 'include "trust";
       def tv: {login: .user.login, assoc: .author_association} | tvoice($me; $ig; $bots; $tr);
-      (map(select(tv) | .id)) as $ok | map(select(tv and ((.in_reply_to_id // .id) | IN($ok[]))))' \
+      def nobot: $ep != "issue-comments" or (.user.login | IN($bots[]) | not);
+      (map(select(tv) | .id)) as $ok | map(select(tv and nobot and ((.in_reply_to_id // .id) | IN($ok[]))))' \
       "$JOB/$ep.json" >"$JOB/$ep.trusted" && mv "$JOB/$ep.trusted" "$JOB/$ep.json" || fail "could not filter $ep to trusted authors"
   fi
 done
