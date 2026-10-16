@@ -21,7 +21,7 @@ In `job_dir`: `pr.json`, `diff.patch`, `reviews.json`, `comments.json` (inline r
 
 ## 1. Collect open feedback
 
-A point is open when it comes from someone other than `me` (the PR author) and no later reply from the PR author is in its thread, or it is the body of a CHANGES_REQUESTED review (take each reviewer's latest review) or a top-level comment that no later reply answers. An APPROVED review can still carry open points ("lgtm with comments", a numbered list): each point in its body is open too. A review bot's inline comment (CodeRabbit and the like) is open like a person's; weigh it on its merits. A thread that `threads.json` marks resolved is closed, whoever wrote it. Ignore pure thanks and praise, and bot status chatter.
+A point is open when it comes from someone other than `me` (the PR author) and no later reply from the PR author is in its thread, or it is the body of a CHANGES_REQUESTED review (take each reviewer's latest review) or a top-level comment that no later reply answers. An APPROVED review can still carry open points ("lgtm with comments", a numbered list): each point in its body is open too. A review bot's inline comment (CodeRabbit and the like) is open like a person's; weigh it on its merits. The files hold only trusted voices, and only threads a trusted voice started: the script dropped the rest. A thread that `threads.json` marks resolved is closed, whoever wrote it. Ignore pure thanks and praise, and bot status chatter.
 
 ## 2. Triage
 

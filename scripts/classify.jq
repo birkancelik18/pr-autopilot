@@ -12,6 +12,7 @@
 #       head commit's check-runs response, {"check_runs": []} when not fetched; cirec is the head's
 #       ci-local record, null when there is none or ci_source is not local).
 # Output: {skip: why} or {kind: "review"|"fix", key, ...} plus PR facts for the job.
+include "trust" {search: "./"};
 def human: select(.user.login != $me and (.user.login | endswith("[bot]") | not)
     and (.user.login | IN($ignore[]) | not));
 # Feedback only counts from people with a stake in the repo: its owner, org members, collaborators,
@@ -45,8 +46,7 @@ def maxid: if length == 0 then null else max_by(.id) end;
         # bot such as CodeRabbit: a bot can relay a stranger, so any other bot does not count) and whose
         # newest comment is from a trusted voice other than me (my own reply last: nothing new).
         # Keyed on that newest comment, so a new one runs again (capped per PR in poll.sh).
-        | def tvoice: .login == $me or (.login | IN($ignore[]) | not) and ((.login | IN($review_bots[]))
-            or (.login | endswith("[bot]") | not) and ((.assoc | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.login | IN($trusted[]))));
+        | def tvoice: tvoice($me; $ignore; $review_bots; $trusted); # trust.jq: job.sh filters the model's input with it too
           ([($threads[0] // [])[] | select(.resolved | not) | select(.starter != null and (.starter | tvoice))
             | .comments | last | select(.login != $me and tvoice)]
           | if length == 0 then null else max_by(.id) | {id, user: {login}} end) as $t

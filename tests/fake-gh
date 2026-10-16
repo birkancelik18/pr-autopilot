@@ -87,6 +87,8 @@ case "$method $ep" in
     if [ -n "${FAKE_CHECKS:-}" ]; then cat "$FAKE_CHECKS"; else echo '{"check_runs": []}'; fi | out ;;
   "GET repos/"*/actions/jobs/*/logs) printf 'step 1\nFAIL src/a.test.ts > expects the old label\nExpected: "A" Received: "B"\n' ;;
   "POST repos/"*/actions/runs/*/rerun-failed-jobs) echo "POST $ep" >>"$W"; echo '{}' ;;
+  "GET repos/"*/pulls/*/commits) # FAKE_COMMITS: a file with the list; default one commit by me at the head
+    if [ -n "${FAKE_COMMITS:-}" ]; then cat "$FAKE_COMMITS"; else jq '[{sha: .head.sha, author: {login: "me"}}]' "$FIX/pr-$(num "$ep").json"; fi ;;
   "GET repos/"*/pulls/*)
     n=$(num "$ep")
     sha=""; [ -n "${FAKE_HEAD_REPO:-}" ] && sha=$(git -C "$FAKE_HEAD_REPO" rev-parse refs/heads/feature-11)

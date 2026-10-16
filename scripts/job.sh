@@ -142,10 +142,22 @@ if [ "$kind" = cilocal ]; then
   ci_tmo=$(cfgd ci_timeout_minutes 90)
   # ci-local runs only my own PRs' code here. A teammate's PR code never runs on this Mac: only
   # through the ci_container runner (config), and with none set, not at all.
+  # My own PR means: I opened it AND every commit's GitHub author is me. A commit someone else pushed to
+  # my branch (or one GitHub cannot tie to an account) makes it a teammate case. The commits API stops
+  # at 250: a list that long may hide one, so it counts as a teammate case too.
   runner=$CI_LOCAL
   if [ "$(g '.author // ""')" != "$me" ]; then
     runner=$(ci_container)
     [ -n "$runner" ] || fail "local CI not run on $(g '.author // "?"')'s PR: their code never runs on this Mac outside a container, and ci_container is not set"
+  else
+    commits=$(gh_get --paginate "repos/$repo/pulls/$n/commits" | jq -s 'add // []') || fail "could not list the PR's commits"
+    jq -e --arg h "$head" 'any(.[]; .sha == $h)' <<<"$commits" >/dev/null || skip_quietly "head moved before local CI"
+    others=$(jq -r --arg me "$me" 'if length >= 250 then "250 or more commits, not all of them visible" else
+      [.[] | .author.login // "an unknown author" | select(. != $me)] | unique | if length > 0 then "commits by " + join(", ") else "" end end' <<<"$commits")
+    if [ -n "$others" ]; then
+      runner=$(ci_container)
+      [ -n "$runner" ] || succeed "local CI not run on #$n (${head:0:8}): it has $others; code that is not all yours never runs on this Mac outside a container, and ci_container is not set."
+    fi
   fi
   if [ ! -s "$rec" ]; then
     [ -x "$runner" ] || fail "ci_source is local but $runner is not an executable"
@@ -199,14 +211,16 @@ for ep in reviews comments issue-comments; do
   esac
   gh api --paginate "$path" 2>>"$LOG" | jq -s 'add // []' >"$JOB/$ep.json" || fail "fetch $ep failed"
   [ -s "$JOB/$ep.json" ] || fail "fetch $ep returned nothing"
-  # Own PR: only trusted voices reach the model (me, owner/member/collaborator, trusted_commenters, a
-  # known review bot); a stranger's text, or a bot relaying it, never does. Not on a review of someone
-  # else's PR: there the whole PR is the untrusted input being judged.
+  # Own PR: only trusted voices reach the model (trust.jq, the rule classify.jq triggers on); a stranger's
+  # text never does, and neither does a whole review thread a stranger started (a review bot or anyone
+  # answering in it would relay them). A thread's root is in_reply_to_id (GitHub points every reply at
+  # it); a root not in the list counts as untrusted. Not on a review of someone else's PR: there the
+  # whole PR is the untrusted input being judged.
   if [ "$kind" != review ]; then
-    jq --arg me "$me" --argjson bots "$(review_bots)" --argjson tr "$(jq -c '.trusted_commenters // []' "$CONFIG")" \
-      --argjson ig "$(jq -c '.ignore_authors // []' "$CONFIG")" 'map(select(.user.login == $me
-        or (.user.login | IN($ig[]) | not) and ((.user.login | IN($bots[])) or (.user.login | endswith("[bot]") | not)
-          and (((.author_association // "NONE") | IN("OWNER", "MEMBER", "COLLABORATOR")) or (.user.login | IN($tr[]))))))' \
+    jq -L "$DIR" --arg me "$me" --argjson bots "$(review_bots)" --argjson tr "$(jq -c '.trusted_commenters // []' "$CONFIG")" \
+      --argjson ig "$(jq -c '.ignore_authors // []' "$CONFIG")" 'include "trust";
+      def tv: {login: .user.login, assoc: .author_association} | tvoice($me; $ig; $bots; $tr);
+      (map(select(tv) | .id)) as $ok | map(select(tv and ((.in_reply_to_id // .id) | IN($ok[]))))' \
       "$JOB/$ep.json" >"$JOB/$ep.trusted" && mv "$JOB/$ep.trusted" "$JOB/$ep.json" || fail "could not filter $ep to trusted authors"
   fi
 done
