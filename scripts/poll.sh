@@ -72,16 +72,15 @@ for k in reviewing_mode mine_mode; do # a typo acts as notify, but never silentl
 done
 rok=$([ "$rmode" != off ] && cfgd review_enabled true || echo false)
 fok=$([ "$mmode" != off ] && cfgd fix_enabled true || echo false)
-# notify must not run CI on a teammate's PR either: that is part of acting on it.
-ccont=$([ -n "$(ci_container)" ] && [ "$rmode" = act ] && echo true || echo false)
+# Local CI was removed in 0.6.0: old keys are ignored, once per poll in the log, never a crash.
+legacy=$(legacy_ci_keys)
+[ -z "$legacy" ] || log "WARN config key(s) $legacy ignored: local CI was removed, GitHub checks are the only CI source"
 
 flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson review_enabled "$rok"
   --argjson fix_enabled "$fok"
   --argjson conflict_enabled "$(cfgd conflict_enabled true)"
   --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
-  --argjson ci_local "$(ci_local && echo true || echo false)"
-  --argjson ci_container "$ccont"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")"
   --argjson review_bots "$(review_bots)")
@@ -182,25 +181,19 @@ process_item() {
     fetch "repos/$repo/pulls/$n/comments" "$tmp/comments" paginated &&
     fetch "repos/$repo/issues/$n/comments" "$tmp/issue" paginated ||
     { log "ERROR $repo#$n: could not fetch PR data, will retry next poll"; return 1; }
-  # CI results only matter on the user's own PRs. With ci_source local, CI is the head's ci-local
-  # record (null: not run yet) and GitHub's check runs are never read.
-  echo '{"check_runs": []}' >"$tmp/checks"; echo null >"$tmp/cirec"; echo '[]' >"$tmp/threads"
+  # CI results (GitHub check runs) only matter on the user's own PRs.
+  echo '{"check_runs": []}' >"$tmp/checks"; echo '[]' >"$tmp/threads"
   # Unresolved review threads only matter on the user's own PRs too (a feedback fix).
   if [ "$(jq -r .user.login "$tmp/pr")" = "$me" ] && ! review_threads "$repo" "$n" >"$tmp/threads" 2>>"$STATE_DIR/polls.log"; then
     log "ERROR $repo#$n: could not fetch review threads, will retry next poll"; return 1
   fi
-  if ci_local; then
-    local rec; rec=$(ci_record "$repo" "$(jq -r .head.sha "$tmp/pr")")
-    if [ -s "$rec" ] && ! jq -e 'select(type == "object")' "$rec" >"$tmp/cirec" 2>/dev/null; then
-      log "ERROR $repo#$n: unreadable ci-local record $rec, will retry next poll"; return 1
-    fi
-  elif [ "$(jq -r .user.login "$tmp/pr")" = "$me" ]; then
+  if [ "$(jq -r .user.login "$tmp/pr")" = "$me" ]; then
     fetch "repos/$repo/commits/$(jq -r .head.sha "$tmp/pr")/check-runs?per_page=100" "$tmp/checks" ||
       { log "ERROR $repo#$n: could not fetch check runs, will retry next poll"; return 1; }
   fi
   ev=$(jq -n -c -f "$DIR/classify.jq" --arg me "$me" --arg reason "$reason" --arg repo "$repo" \
     --argjson via_search "$(jq -r .via_search <<<"$item")" "${flags[@]}" --slurpfile pr "$tmp/pr" --slurpfile reviews "$tmp/reviews" \
-    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks" --slurpfile cirec "$tmp/cirec" --slurpfile threads "$tmp/threads") ||
+    --slurpfile comments "$tmp/comments" --slurpfile issue "$tmp/issue" --slurpfile checks "$tmp/checks" --slurpfile threads "$tmp/threads") ||
     { log "ERROR $repo#$n: classification failed"; return 1; }
   # What failed.tsv pruning below may keep for this PR: only the keys of its current state. A skip
   # (draft, nothing to address) says nothing about a failure, except closed or merged.
@@ -244,9 +237,8 @@ PR #$n ($(jq -r .title <<<"$1")): $2 (notify only: nothing was posted, fixed or 
     log "skip $repo#$n: CI still failing after $MAX_CI_FIXES fix attempts"
     if ! grep -qxF "$mode|$repo#$n" "$STATE_DIR/ci-gave-up.tsv" 2>/dev/null; then
       echo "$mode|$repo#$n" >>"$STATE_DIR/ci-gave-up.tsv"
-      local lc=""; ci_local && lc="local "
       report "$(jq -r .url <<<"$ev")
-PR #$n ($(jq -r .title <<<"$ev")): ${lc}CI is still failing after $MAX_CI_FIXES fix attempts. I stopped; this one needs you."
+PR #$n ($(jq -r .title <<<"$ev")): CI is still failing after $MAX_CI_FIXES fix attempts. I stopped; this one needs you."
     fi
     settle; return 0
   fi
@@ -276,10 +268,6 @@ PR #$n ($(jq -r .title <<<"$ev")): new review feedback keeps coming after $np fe
   fi
   if [ -n "$limited" ]; then return 0; fi
   if [ "$(running)" -ge "$max" ]; then log "at max_parallel=$max, deferring $repo#$n"; return 0; fi
-  # ci-local runs one PR at a time: start one, the rest wait for a later poll.
-  if [ "$(jq -r .kind <<<"$ev")" = cilocal ] && key_running "$mode|cilocal|*"; then
-    log "a ci-local run is going, queueing $repo#$n"; return 0
-  fi
 
   file="$STATE_DIR/events/$(date +%Y%m%dT%H%M%S)-${repo//\//_}-$n.json"
   thread=$(jq -r .thread <<<"$item")

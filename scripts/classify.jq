@@ -4,13 +4,10 @@
 #       --argjson review_bots (bot logins whose review threads count, e.g. ["coderabbitai[bot]"])
 #       --argjson via_search (true when the review request came from the search source)
 #       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled/ci_enabled
-#       --argjson ci_local (true when config ci_source is "local": CI is ci-local's record, never check runs)
-#       --argjson ci_container (true when config ci_container is set: the only way a teammate's PR gets local CI)
 #       --slurpfile threads (review_threads in lib.sh: [{id, resolved, comments: [{id, login, assoc}]}],
 #       [] when not fetched)
-#       --slurpfile pr/reviews/comments/issue/checks/cirec (each file holds one JSON value; checks is the
-#       head commit's check-runs response, {"check_runs": []} when not fetched; cirec is the head's
-#       ci-local record, null when there is none or ci_source is not local).
+#       --slurpfile pr/reviews/comments/issue/checks (each file holds one JSON value; checks is the
+#       head commit's check-runs response, {"check_runs": []} when not fetched).
 # Output: {skip: why} or {kind: "review"|"fix", key, ...} plus PR facts for the job.
 include "trust" {search: "./"};
 def human: select(.user.login != $me and (.user.login | endswith("[bot]") | not)
@@ -20,8 +17,7 @@ def human: select(.user.login != $me and (.user.login | endswith("[bot]") | not)
 def trusted: ((.author_association // "NONE") | IN("OWNER", "MEMBER", "COLLABORATOR"))
     or (.user.login | IN($trusted[]));
 def maxid: if length == 0 then null else max_by(.id) end;
-($pr[0]) as $p | ($reviews[0]) as $rv | ($comments[0]) as $cm | ($issue[0]) as $ic | $checks as $ck | ($cirec[0]) as $rec
-| "cilocal|\($repo)|\($p.number)|\($p.head.sha)" as $lkey
+($pr[0]) as $p | ($reviews[0]) as $rv | ($comments[0]) as $cm | ($issue[0]) as $ic | $checks as $ck
 | (($p.head.repo.full_name // "") != $p.base.repo.full_name) as $fork
 | ([($rv + $cm + $ic)[] | human | select(trusted | not)] | length) as $untrusted
 | (
@@ -61,15 +57,12 @@ def maxid: if length == 0 then null else max_by(.id) end;
         # Merge conflict: GitHub says "dirty"; keyed on both shas, so a new conflict is a new job.
         | ($conflict_enabled and ($p.mergeable_state // "") == "dirty") as $dirty
         | "conflict|\($repo)|\($p.number)|\($p.head.sha)|\($p.base.sha // "")" as $ckey
-        # Failing CI: every check run on the head commit finished and one failed or timed out. Local CI:
-        # the head has no ci-local record yet (run it), or its record is fail or incomplete.
-        | (if $ci_local then $ci_enabled and (($rec.result // "") | IN("fail", "incomplete"))
-          else ($ck[0].check_runs // []) as $runs | $ci_enabled and ($runs | length) > 0
+        # Failing CI: every check run on the head commit finished and one failed or timed out.
+        | (($ck[0].check_runs // []) as $runs | $ci_enabled and ($runs | length) > 0
             and all($runs[]; .status == "completed")
-            and any($runs[]; (.conclusion // "") | IN("failure", "timed_out")) end) as $red
+            and any($runs[]; (.conclusion // "") | IN("failure", "timed_out"))) as $red
         | ($fixes
             + (if $dirty then [{kind: "conflict", key: $ckey, who: "the base branch"}] else [] end)
-            + (if $ci_local and $rec == null then [{kind: "cilocal", key: $lkey, who: "local CI"}] else [] end)
             + (if $red then [{kind: "cifix", key: "cifix|\($repo)|\($p.number)|\($p.head.sha)", who: "CI"}] else [] end)
           ) as $steps
         | if ($steps | length) == 0 then {skip: "nothing to address"}
@@ -84,9 +77,6 @@ def maxid: if length == 0 then null else max_by(.id) end;
       elif ([$rv[] | select(.user.login == $me and .commit_id == $p.head.sha
           and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | length) > 0 then
         {skip: "already reviewed this head"}
-      # Local CI: it runs on the head first, and the review's verdict depends on its record (job.sh). A
-      # teammate's code never runs on this Mac: only in the ci_container runner; without one, no local CI.
-      elif $ci_local and $ci_container and $rec == null then {kind: "cilocal", key: $lkey, who: $p.user.login}
       else {kind: "review", key: "review|\($repo)|\($p.number)|\($p.head.sha)", who: $p.user.login}
       end
     else {skip: "not actionable (reason: \($reason))"}

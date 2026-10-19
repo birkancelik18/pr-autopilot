@@ -45,6 +45,8 @@ case ${1:-} in
     if [ -f "$CONFIG" ]; then
       echo "dry_run: $(cfgd dry_run true)   repos: $(cfg '.repos | keys | join(", ")')"
       echo "reviewing others: $(mode_show reviewing_mode)   my PRs: $(mode_show mine_mode)   (off | notify | walk | act; mine has no walk)"
+      [ -z "$(legacy_ci_keys)" ] ||
+        echo "WARNING: config key(s) $(legacy_ci_keys) are ignored: local CI was removed, GitHub checks are the only CI source."
     else
       echo "No config at $CONFIG (run /pr-autopilot:setup)"
     fi

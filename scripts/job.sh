@@ -31,12 +31,11 @@ clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downc
 
 if [ "$kind" = review ]; then what="$who asked you to review it"
 elif [ "$kind" = conflict ]; then what="yours has merge conflicts with $base"
-elif [ "$kind" = cifix ]; then what="$(ci_local && echo "local ")CI failed on yours"
+elif [ "$kind" = cifix ]; then what="CI failed on yours"
 elif [ "$cr" = true ]; then what="$who requested changes on yours"
 else what="$who commented on yours"; fi
 # The PR link leads the notification: a click cannot open it, so it has to be readable.
 prefix="PR #$n ($title): $what."
-[ "$kind" = cilocal ] && prefix="PR #$n ($title):" # its outcome says it: "local CI passed on #N (sha8)"
 [ "$dry" = true ] && prefix="[DRY RUN] $prefix"
 prefix="$url
 $prefix"
@@ -132,56 +131,6 @@ case $ourl in
   *) fail "the clone's origin ($ourl) does not point at $repo, refusing to fetch or push" ;;
 esac
 abort_if_paused
-
-# --- local CI (ci_source local): run ci-local on this head and report its record. No model and no
-# checkout here: ci-local makes its own worktree and writes nothing to GitHub. The poller starts one
-# of these at a time. Also in dry-run: it is the CI, not a write.
-if [ "$kind" = cilocal ]; then
-  check_head
-  rec=$(ci_record "$repo" "$head") rc=0
-  ci_tmo=$(cfgd ci_timeout_minutes 90)
-  # ci-local runs only my own PRs' code here. A teammate's PR code never runs on this Mac: only
-  # through the ci_container runner (config), and with none set, not at all.
-  # My own PR means: I opened it AND every commit's GitHub author is me. A commit someone else pushed to
-  # my branch (or one GitHub cannot tie to an account) makes it a teammate case. The commits API stops
-  # at 250: a list that long may hide one, so it counts as a teammate case too.
-  runner=$CI_LOCAL
-  if [ "$(g '.author // ""')" != "$me" ]; then
-    runner=$(ci_container)
-    [ -n "$runner" ] || fail "local CI not run on $(g '.author // "?"')'s PR: their code never runs on this Mac outside a container, and ci_container is not set"
-  else
-    commits=$(gh_get --paginate "repos/$repo/pulls/$n/commits" | jq -s 'add // []') || fail "could not list the PR's commits"
-    jq -e --arg h "$head" 'any(.[]; .sha == $h)' <<<"$commits" >/dev/null || skip_quietly "head moved before local CI"
-    others=$(jq -r --arg me "$me" 'if length >= 250 then "250 or more commits, not all of them visible" else
-      [.[] | .author.login // "an unknown author" | select(. != $me)] | unique | if length > 0 then "commits by " + join(", ") else "" end end' <<<"$commits")
-    if [ -n "$others" ]; then
-      runner=$(ci_container)
-      [ -n "$runner" ] || succeed "local CI not run on #$n (${head:0:8}): it has $others; code that is not all yours never runs on this Mac outside a container, and ci_container is not set."
-    fi
-  fi
-  if [ ! -s "$rec" ]; then
-    [ -x "$runner" ] || fail "ci_source is local but $runner is not an executable"
-    # The commits checked above are of $head; ci-local checks out whatever the head is now. Re-check
-    # right before launch so a push in between is skipped, not run unchecked.
-    # ponytail: a push can still land between this read and ci-local's fetch; pass --expect-sha "$head"
-    # once ci-local supports it.
-    check_head
-    echo "running: $runner $n --repo $repo (timeout ${ci_tmo}m)" >>"$LOG"
-    set -m
-    with_timeout $((ci_tmo * 60)) "$runner" "$n" --repo "$repo" >>"$LOG" 2>&1 </dev/null &
-    cpid=$!
-    set +m
-    wait "$cpid"; rc=$?; cpid=""
-    echo "ci-local exited with status $rc" >>"$LOG"
-  fi
-  if [ ! -s "$rec" ]; then
-    check_head # the head moved: ci-local ran the new one
-    [ "$rc" -ne 124 ] || fail "ci-local timed out after ${ci_tmo}m (ci_timeout_minutes) and wrote no record for ${head:0:8}"
-    fail "ci-local exited with status $rc and wrote no record for ${head:0:8}"
-  fi
-  sum=$(ci_summary "$rec") || fail "the ci-local record $rec is unreadable"
-  succeed "$sum."
-fi
 
 # --- pre-fetch everything the model may read into the job dir (all of it is untrusted data)
 gh_get "repos/$repo/pulls/$n" >"$JOB/pr.json" || fail "fetch PR failed"
@@ -304,26 +253,7 @@ fi
 
 # --- failing CI: hand the model the failing checks and the tail of each GitHub Actions job log
 # (untrusted data, like the rest of the PR). The model only edits files; CI verifies the fix.
-if [ "$kind" = cifix ] && ci_local; then
-  # Local CI: the failing jobs of this head's ci-local record, each with its command and log tail.
-  mkdir -p "$JOB/ci"
-  rec=$(ci_record "$repo" "$head")
-  jq -e --arg h "$head" '.sha == $h and (.result | IN("fail", "incomplete"))' "$rec" >/dev/null 2>&1 ||
-    skip_quietly "no failing local CI record for this commit any more"
-  ci_i=0
-  while IFS= read -r ci_j; do
-    ci_i=$((ci_i + 1))
-    ci_name=$(jq -r '.job' <<<"$ci_j") ci_src=$(jq -r '.log // ""' <<<"$ci_j")
-    ci_log="$JOB/ci/$ci_i-$(printf '%s' "$ci_name" | tr -c 'A-Za-z0-9._-' _ | cut -c1-60).log"
-    if [ -f "$ci_src" ] && tail -n 400 "$ci_src" >"$ci_log" && [ -s "$ci_log" ]; then :
-    else echo "could not read the log of $ci_name ($ci_src)" >>"$LOG"; ci_log=""; fi
-    jq -c --arg l "$ci_log" '{name: .job, workflow, conclusion: (if .skipped_reason then "skipped" else "failure" end),
-      command, exit_code, skipped_reason, log: (if $l == "" then null else $l end)}' <<<"$ci_j"
-  done < <(jq -c '.jobs[] | select(.exit_code != 0 or .skipped_reason != null)' "$rec") | jq -s . >"$JOB/ci/failed.json" ||
-    fail "could not read the failing jobs from $rec"
-  [ "$(jq length "$JOB/ci/failed.json")" -gt 0 ] ||
-    succeed "$(ci_summary "$rec"). No job to fix, ci-local could not run it; this one needs you."
-elif [ "$kind" = cifix ]; then
+if [ "$kind" = cifix ]; then
   mkdir -p "$JOB/ci"
   gh_get "repos/$repo/commits/$head/check-runs?per_page=100" | jq '[.check_runs[]
     | select((.conclusion // "") | IN("failure", "timed_out"))
@@ -453,20 +383,6 @@ if [ -z "$skip_model" ]; then
 fi
 
 # =============================== review: post the draft ===============================
-# ci_review_note <record>: what a review says about failing local CI: the summary, then the last lines
-# of each failing job's log (at most 3 jobs, 15 lines each). Log text is untrusted: a fence in it is
-# broken up so it cannot close ours, and the whole body is defanged before posting.
-ci_review_note() {
-  local s j log
-  s=$(ci_summary "$1") || return 1
-  printf '%s.\n' "L${s#l}"
-  while IFS=$'\t' read -r j log; do
-    [ -f "$log" ] || continue
-    printf '\nLast lines of %s:\n\n```\n' "$j"
-    tail -n 15 "$log" | cut -c1-200 | sed 's/```/` ` `/g'
-    printf '```\n'
-  done < <(jq -r '[.jobs[] | select(.exit_code != 0 or .skipped_reason != null)][0:3][] | [.job, (.log // "")] | @tsv' "$1")
-}
 finish_review() {
   [ "${agent_calls:-0}" -ge "$npasses" ] ||
     fail "review needs $npasses parallel passes but only ${agent_calls:-0} subagent call(s) ran (max in one message: ${agent_parallel:-0})"
@@ -503,26 +419,6 @@ finish_review() {
   [ "$body_words" -le 150 ] || fail "draft body is $body_words words even after asking for a rewrite, limit is 150"
   [ -z "$tells" ] || fail "the draft still reads machine-written after a rewrite ($tells)"
   why=$(head -1 "$JOB/body.md" | cut -c1-160)
-  # Local CI: APPROVE only when this head's ci-local record is pass. Otherwise REQUEST_CHANGES (a
-  # COMMENT when the code review found nothing), naming the failing jobs with the tail of their logs.
-  # Only with a container runner: a teammate's code never runs on this Mac, so without ci_container the
-  # review is what it was before local CI, and says local CI did not run.
-  # Walk mode: the poller does not run ci-local for it (a private draft, nothing posted), so there is
-  # no record to wait for.
-  if [ "$(g '.walk // false')" = true ]; then :
-  elif ci_local && [ -z "$(ci_container)" ]; then
-    printf '\nlocal CI not run: container runner not set up yet\n' >>"$JOB/body.md"
-  elif ci_local; then
-    local rec; rec=$(ci_record "$repo" "$head")
-    [ -s "$rec" ] || fail "no local CI record for ${head:0:8} (the poller runs ci-local before the review)"
-    if [ "$(jq -r --arg h "$head" 'if .sha == $h then .result else "for another commit" end' "$rec" 2>/dev/null)" != pass ]; then
-      ci_review_note "$rec" >"$JOB/ci-note.md" || fail "the ci-local record $rec is unreadable"
-      if [ "$event" = APPROVE ]; then event=COMMENT state=COMMENTED; cp "$JOB/ci-note.md" "$JOB/body.md"
-      else { echo; cat "$JOB/ci-note.md"; } >>"$JOB/body.md"; fi
-      why=$(ci_summary "$rec")
-    fi
-  fi
-
   check_head
   # walk mode: nothing goes to GitHub. The draft is kept for /pr-autopilot:walk, which posts only on the user's pick.
   if [ "$(g '.walk // false')" = true ]; then
@@ -875,9 +771,6 @@ finish_cifix() {
   if [ "$action" = none ]; then
     succeed "I did not fix the failing CI: $summary. This one needs you."
   fi
-  if [ "$action" = rerun ] && ci_local; then # GitHub jobs are never re-run as CI when CI is local
-    succeed "I think the local CI failure is not caused by the code ($summary). Nothing is re-run; this one needs you."
-  fi
   if [ "$action" = rerun ]; then
     # Flaky or infrastructure failure: re-run the failed GitHub Actions jobs. Once per commit: the
     # job key is the head sha, so a second red run on the same commit is left to the user.
@@ -917,8 +810,7 @@ finish_cifix() {
     seen=$(gh_get "repos/$repo/pulls/$n" --jq .head.sha); [ "$seen" = "$newsha" ] && break; sleep 2
   done
   [ "$seen" = "$newsha" ] || fail "pushed ${newsha:0:7} but GitHub shows head ${seen:0:7}"
-  local again="CI runs again."; ci_local && again="Local CI runs on the new head next."
-  succeed "I fixed the failing CI: $summary, pushed ${newsha:0:7} (verified on GitHub). $again"
+  succeed "I fixed the failing CI: $summary, pushed ${newsha:0:7} (verified on GitHub). CI runs again."
 }
 
 if [ "$kind" = review ]; then finish_review

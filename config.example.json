@@ -20,7 +20,5 @@
   "review_skills": [],
   "notify_style": "window",
   "conflict_enabled": true,
-  "ci_fix_enabled": true,
-  "ci_source": "github",
-  "ci_timeout_minutes": 90
+  "ci_fix_enabled": true
 }
