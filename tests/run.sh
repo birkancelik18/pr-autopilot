@@ -157,6 +157,35 @@ check "limit hit just now: no job starts" "$n0" "$(jobs_n)"
 rm -f "$S/claude_limited"; : >"$S/seen.tsv"; poll
 check "limit gone: jobs start again" 1 "$([ "$(jobs_n)" -gt "$n0" ] && echo 1 || echo 0)"
 
+echo "== poller: reviewing_mode and mine_mode, each off | notify | act (fresh fixtures and state)"
+oldFIX=$FIX oldS=$S oldST=$PR_AUTOPILOT_STATE
+export FIX=$W/fix-modes PR_AUTOPILOT_STATE=$W/state-modes; S=$PR_AUTOPILOT_STATE
+cp -R "$T/fixtures" "$FIX"
+modes() { # modes <reviewing> <mine>: a clean poll with those settings; prints "reviews fixes notifications"
+  rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"
+  mkcfg true "$(jq -n --argjson r "$1" --argjson m "$2" '{reviewing_mode: $r, mine_mode: $m}')"; poll
+  echo "$(grep -c '^\["review"' "$S/jobs.log") $(grep -c '^\["fix"' "$S/jobs.log") $(cat "$S/inbox.jsonl" 2>/dev/null | grep -c "notify only")"
+}
+check "default (keys missing) = act for both: 3 reviews + 1 fix, no notify" "3 1 0" "$(rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true; poll; echo "$(grep -c '^\["review"' "$S/jobs.log") $(grep -c '^\["fix"' "$S/jobs.log") $(cat "$S/inbox.jsonl" 2>/dev/null | grep -c "notify only")")"
+check "reviewing act, mine act" "3 1 0" "$(modes '"act"' '"act"')"
+check "reviewing notify: no review job, one notification per review request, fix untouched" "0 1 3" "$(modes '"notify"' '"act"')"
+check "the notification carries the PR link and who asked" 3 "$(jq -r 'select(.text | test("asked for your review")) | .url' "$S/inbox.jsonl" | grep -c '^https://github.com/')"
+poll; check "notify tells once: a second poll adds nothing" 3 "$(grep -c 'notify only' "$S/inbox.jsonl")"
+check "reviewing off: no review job, no notification" "0 1 0" "$(modes '"off"' '"act"')"
+check "mine notify: no fix job, one notification, reviews untouched" "3 0 1" "$(modes '"act"' '"notify"')"
+check "the notification names the reviewer and the PR" 1 "$(jq -r '.text' "$S/inbox.jsonl" | grep -c 'PR #12 .*new review feedback from .*notify only')"
+poll; check "mine notify tells once: a second poll adds nothing" 1 "$(grep -c 'notify only' "$S/inbox.jsonl")"
+check "mine off: no fix job, no notification" "3 0 0" "$(modes '"act"' '"off"')"
+check "both notify: nothing runs, 4 notifications" "0 0 4" "$(modes '"notify"' '"notify"')"
+check "an unknown value counts as notify, never act" "0 0 4" "$(modes '"typo"' '"typo"')"
+check "dry-run stays on alongside act (jobs carry dry_run true)" 1 "$(modes '"act"' '"act"' >/dev/null; jq -s -r '[.[] | select(.[0] == "review" and .[4] == true)] | length > 0 | if . then 1 else 0 end' "$S/jobs.log")"
+mkcfg true; echo "== ctl.sh mode"
+bash "$T/../scripts/ctl.sh" mode mine notify >/dev/null; bash "$T/../scripts/ctl.sh" mode reviewing off >/dev/null
+check "ctl mode writes both keys" "notify off" "$(jq -r '"\(.mine_mode) \(.reviewing_mode)"' "$PR_AUTOPILOT_CONFIG")"
+check "ctl mode rejects a bad value and leaves the config alone" "2 notify" "$(bash "$T/../scripts/ctl.sh" mode mine nope >/dev/null 2>&1; echo -n "$? "; jq -r .mine_mode "$PR_AUTOPILOT_CONFIG")"
+check "status shows both" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: off   my PRs: notify')"
+FIX=$oldFIX S=$oldS; export FIX PR_AUTOPILOT_STATE=$oldST
+
 echo "== poller: ci_source local runs ci-local one PR at a time, and its record drives the CI fix"
 rm -rf "$DAVID_STATE" "$S/ci-gave-up.tsv"; : >"$S/handled.tsv"; : >"$S/seen.tsv"; : >"$S/failed.tsv"; rm -f "$S/notified"
 mkcfg true '{"ci_source": "local"}'
@@ -899,7 +928,7 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.3.1 and the installer reports it" "0.3.1 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.3.1')"
+check "plugin version is 0.5.0 and the installer reports it" "0.5.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.5.0')"
 if ! command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
   (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1

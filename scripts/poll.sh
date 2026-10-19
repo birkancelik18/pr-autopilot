@@ -60,13 +60,23 @@ fi
 echo "$mode" >"$STATE_DIR/mode"
 live_since=$(cat "$STATE_DIR/live_since" 2>/dev/null || echo 1970-01-01T00:00:00Z)
 
+# Two switches, each off | notify | act (default act): reviewing_mode = review requests where I am the
+# reviewer, mine_mode = review feedback on PRs I wrote. off: ignored. notify: one report per event
+# (notify_only below), nothing posted, fixed or pushed. act: today's behaviour. They combine with
+# review_enabled / fix_enabled (false there still means nothing happens).
+rmode=$(mode_of reviewing_mode) mmode=$(mode_of mine_mode)
+rok=$([ "$rmode" != off ] && cfgd review_enabled true || echo false)
+fok=$([ "$mmode" != off ] && cfgd fix_enabled true || echo false)
+# notify must not run CI on a teammate's PR either: that is part of acting on it.
+ccont=$([ -n "$(ci_container)" ] && [ "$rmode" = act ] && echo true || echo false)
+
 flags=(--argjson allow_forks "$(cfgd allow_forks false)"
-  --argjson review_enabled "$(cfgd review_enabled true)"
-  --argjson fix_enabled "$(cfgd fix_enabled true)"
+  --argjson review_enabled "$rok"
+  --argjson fix_enabled "$fok"
   --argjson conflict_enabled "$(cfgd conflict_enabled true)"
   --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
   --argjson ci_local "$(ci_local && echo true || echo false)"
-  --argjson ci_container "$([ -n "$(ci_container)" ] && echo true || echo false)"
+  --argjson ci_container "$ccont"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")"
   --argjson review_bots "$(review_bots)")
@@ -199,11 +209,24 @@ process_item() {
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; settle; return 0
   fi
   key="$mode|$(jq -r .key <<<"$ev")"
+  # notify mode: tell the user once per event (its key goes into handled.tsv like a finished job), act on nothing.
+  notify_only() { # notify_only <event json> <what happened>
+    echo "$mode|$(jq -r .key <<<"$1")" >>"$HANDLED"
+    report "$(jq -r .url <<<"$1")
+PR #$n ($(jq -r .title <<<"$1")): $2 (notify only: nothing was posted, fixed or pushed)"
+  }
+  if [ "$rmode" = notify ] && [ "$(jq -r .kind <<<"$ev")" = review ] && ! grep -qxF "$key" "$HANDLED"; then
+    notify_only "$ev" "$(jq -r .who <<<"$ev") asked for your review"; settle; return 0
+  fi
   # Own PRs carry ordered steps (feedback, then conflict, then CI): run the first not handled yet.
   local st next=""
   while IFS= read -r st; do
     [ -n "$st" ] || continue
-    grep -qxF "$mode|$(jq -r .key <<<"$st")" "$HANDLED" || { next=$st; break; }
+    grep -qxF "$mode|$(jq -r .key <<<"$st")" "$HANDLED" && continue
+    if [ "$mmode" = notify ] && [ "$(jq -r .kind <<<"$st")" = fix ]; then
+      notify_only "$(jq -c --argjson s "$st" '. + $s' <<<"$ev")" "new review feedback from $(jq -r .who <<<"$st")"; continue
+    fi
+    next=$st; break
   done < <(jq -c '(.steps // [])[]' <<<"$ev")
   if [ -n "$next" ]; then
     ev=$(jq -c --argjson s "$next" '. + $s' <<<"$ev")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# usage: ctl.sh pause|resume|replay|status
+# usage: ctl.sh pause|resume|replay|mode|status
 set -uo pipefail
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/lib.sh"
@@ -29,10 +29,22 @@ case ${1:-} in
     log "REPLAY requested by user"
     echo "Next poll will also act on older unread notifications (live mode only)."
     ;;
+  mode)
+    # ctl.sh mode <reviewing|mine> <off|notify|act>
+    case ${2:-} in reviewing) k=reviewing_mode ;; mine) k=mine_mode ;; *) k= ;; esac
+    case ${3:-} in off|notify|act) ;; *) k= ;; esac
+    [ -n "$k" ] || { echo "usage: ctl.sh mode <reviewing|mine> <off|notify|act>" >&2; exit 2; }
+    [ -f "$CONFIG" ] || { echo "No config at $CONFIG (run /pr-autopilot:setup)" >&2; exit 1; }
+    tmpc=$(mktemp "$CONFIG.XXXXXX") && jq --arg k "$k" --arg v "$3" '.[$k] = $v' "$CONFIG" >"$tmpc" && mv "$tmpc" "$CONFIG" ||
+      { rm -f "$tmpc"; echo "could not update $CONFIG" >&2; exit 1; }
+    log "MODE $k=$3 set by user"
+    echo "$k is now $3 (takes effect at the next poll)."
+    ;;
   status)
     [ -f "$STATE_DIR/paused" ] && echo "State: PAUSED" || echo "State: active"
     if [ -f "$CONFIG" ]; then
       echo "dry_run: $(cfgd dry_run true)   repos: $(cfg '.repos | keys | join(", ")')"
+      echo "reviewing others: $(mode_of reviewing_mode)   my PRs: $(mode_of mine_mode)   (off | notify | act)"
     else
       echo "No config at $CONFIG (run /pr-autopilot:setup)"
     fi
@@ -51,5 +63,5 @@ case ${1:-} in
     echo; echo "Recent reports and failures:"
     grep 'REPORT' "$STATE_DIR/polls.log" 2>/dev/null | tail -8
     ;;
-  *) echo "usage: ctl.sh pause|resume|replay|status" >&2; exit 2 ;;
+  *) echo "usage: ctl.sh pause|resume|replay|mode|status" >&2; exit 2 ;;
 esac

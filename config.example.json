@@ -5,6 +5,8 @@
   "dry_run": false,
   "review_enabled": true,
   "fix_enabled": true,
+  "reviewing_mode": "act",
+  "mine_mode": "act",
   "allow_forks": false,
   "ignore_authors": [],
   "max_parallel": 2,

@@ -73,7 +73,8 @@ Both share one "read" marker, so a result never shows twice. The lines quote PR 
 ## Day to day
 
 - `/pr-autopilot:watch` posts results live in the current chat.
-- `/pr-autopilot:status` shows last polls, running and recent jobs, failures.
+- `/pr-autopilot:status` shows the two modes, last polls, running and recent jobs, failures.
+- `/pr-autopilot:mode <reviewing|mine> <off|notify|act>` flips a switch (no restart). `reviewing` is review requests where you are the reviewer; `mine` is reviews and feedback others leave on PRs you wrote. `off` ignores them; `notify` tells you once per event (PR link and a short summary, in the notification and `/pr-autopilot:watch`) and does nothing else: no review, fix or push, no local CI; `act` is the default and the behaviour described above. Config keys `reviewing_mode` and `mine_mode`; an unknown value counts as `notify`. `mine` covers review feedback only: conflict and CI fixes follow `conflict_enabled` and `ci_fix_enabled`. `dry_run` works alongside: it still turns every `act` into a rehearsal.
 - `/pr-autopilot:pause` is the kill switch: the poller does nothing and running jobs are stopped before they write anything. `/pr-autopilot:resume` undoes it.
 - `/pr-autopilot:replay` includes the pre-live backlog (see above).
 

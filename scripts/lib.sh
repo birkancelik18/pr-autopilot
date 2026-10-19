@@ -10,6 +10,13 @@ cfg() { jq -r "$1" "$CONFIG"; } # usage: cfg '.slack_webhook // ""'
 # cfgd <key> <default-json>: like cfg but keeps an explicit false (jq's // would replace it).
 cfgd() { jq -r --argjson d "$2" ".$1 as \$v | if \$v == null then \$d else \$v end" "$CONFIG"; }
 
+# mode_of <config key>: off | notify | act. Missing means act (today's behaviour). An unknown value
+# means notify: fail closed to "tell me, do nothing" rather than acting on a typo.
+mode_of() {
+  local v; v=$(cfgd "$1" '"act"')
+  case $v in off|notify|act) echo "$v" ;; *) echo notify ;; esac
+}
+
 # with_timeout <seconds> <command...>: runs an external command, stopped (TERM, then KILL) after <seconds>;
 # exits 124 then, like coreutils timeout. Uses gtimeout/timeout when installed (macOS has neither by
 # default), else perl. PR_AUTOPILOT_TIMEOUT_BIN="" forces the perl path (tests).
