@@ -44,7 +44,7 @@ case ${1:-} in
     [ -f "$STATE_DIR/paused" ] && echo "State: PAUSED" || echo "State: active"
     if [ -f "$CONFIG" ]; then
       echo "dry_run: $(cfgd dry_run true)   repos: $(cfg '.repos | keys | join(", ")')"
-      echo "reviewing others: $(mode_of reviewing_mode)   my PRs: $(mode_of mine_mode)   (off | notify | act)"
+      echo "reviewing others: $(mode_show reviewing_mode)   my PRs: $(mode_show mine_mode)   (off | notify | act)"
     else
       echo "No config at $CONFIG (run /pr-autopilot:setup)"
     fi

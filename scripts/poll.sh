@@ -65,6 +65,12 @@ live_since=$(cat "$STATE_DIR/live_since" 2>/dev/null || echo 1970-01-01T00:00:00
 # (notify_only below), nothing posted, fixed or pushed. act: today's behaviour. They combine with
 # review_enabled / fix_enabled (false there still means nothing happens).
 rmode=$(mode_of reviewing_mode) mmode=$(mode_of mine_mode)
+for k in reviewing_mode mine_mode; do # a typo acts as notify, but never silently
+  case $(cfgd "$k" '"act"') in off|notify|act) ;; *)
+    log "WARN $k \"$(cfgd "$k" '"act"')\" is not off|notify|act, treating it as notify"
+    report_throttled "$k \"$(cfgd "$k" '"act"')\" is not off|notify|act, treating it as notify" ;;
+  esac
+done
 rok=$([ "$rmode" != off ] && cfgd review_enabled true || echo false)
 fok=$([ "$mmode" != off ] && cfgd fix_enabled true || echo false)
 # notify must not run CI on a teammate's PR either: that is part of acting on it.

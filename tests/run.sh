@@ -178,6 +178,12 @@ poll; check "mine notify tells once: a second poll adds nothing" 1 "$(grep -c 'n
 check "mine off: no fix job, no notification" "3 0 0" "$(modes '"act"' '"off"')"
 check "both notify: nothing runs, 4 notifications" "0 0 4" "$(modes '"notify"' '"notify"')"
 check "an unknown value counts as notify, never act" "0 0 4" "$(modes '"typo"' '"typo"')"
+modes '"Act"' '"skip"' >/dev/null
+check "a bad value is logged by the poller, for each key" "1 1" "$(grep -c 'WARN reviewing_mode "Act" is not off|notify|act, treating it as notify' "$S/polls.log") $(grep -c 'WARN mine_mode "skip" is not off|notify|act, treating it as notify' "$S/polls.log")"
+check "and reported (throttled: once, the first bad key)" 1 "$(cat "$S/inbox.jsonl" | grep -c 'reviewing_mode \\"Act\\" is not off|notify|act, treating it as notify')"
+check "a valid config logs and reports no such warning" 0 "$(modes '"act"' '"notify"' >/dev/null; grep -c 'is not off|notify|act' "$S/polls.log")"
+mkcfg true '{"reviewing_mode": "Act", "mine_mode": "skip"}'
+check "status shows the raw bad values and says how they are treated" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: Act (unknown, treated as notify)   my PRs: skip (unknown, treated as notify)')"
 check "dry-run stays on alongside act (jobs carry dry_run true)" 1 "$(modes '"act"' '"act"' >/dev/null; jq -s -r '[.[] | select(.[0] == "review" and .[4] == true)] | length > 0 | if . then 1 else 0 end' "$S/jobs.log")"
 mkcfg true; echo "== ctl.sh mode"
 bash "$T/../scripts/ctl.sh" mode mine notify >/dev/null; bash "$T/../scripts/ctl.sh" mode reviewing off >/dev/null

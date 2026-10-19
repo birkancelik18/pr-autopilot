@@ -16,6 +16,11 @@ mode_of() {
   local v; v=$(cfgd "$1" '"act"')
   case $v in off|notify|act) echo "$v" ;; *) echo notify ;; esac
 }
+# mode_show <config key>: the raw value, marked when mode_of would not take it as written.
+mode_show() {
+  local v; v=$(cfgd "$1" '"act"')
+  case $v in off|notify|act) echo "$v" ;; *) echo "$v (unknown, treated as notify)" ;; esac
+}
 
 # with_timeout <seconds> <command...>: runs an external command, stopped (TERM, then KILL) after <seconds>;
 # exits 124 then, like coreutils timeout. Uses gtimeout/timeout when installed (macOS has neither by
