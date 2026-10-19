@@ -507,7 +507,10 @@ finish_review() {
   # COMMENT when the code review found nothing), naming the failing jobs with the tail of their logs.
   # Only with a container runner: a teammate's code never runs on this Mac, so without ci_container the
   # review is what it was before local CI, and says local CI did not run.
-  if ci_local && [ -z "$(ci_container)" ]; then
+  # Walk mode: the poller does not run ci-local for it (a private draft, nothing posted), so there is
+  # no record to wait for.
+  if [ "$(g '.walk // false')" = true ]; then :
+  elif ci_local && [ -z "$(ci_container)" ]; then
     printf '\nlocal CI not run: container runner not set up yet\n' >>"$JOB/body.md"
   elif ci_local; then
     local rec; rec=$(ci_record "$repo" "$head")

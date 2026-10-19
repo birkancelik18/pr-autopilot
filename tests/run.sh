@@ -334,6 +334,11 @@ check "walk posts nothing to GitHub" 0 "$(nwrites 'POST')"
 check "the draft is saved with the head sha and findings" "$SHA REQUEST_CHANGES 1" "$(jq -r '"\(.head) \(.verdict) \(.body | contains("src/a.txt:2") | if . then 1 else 0 end)"' "$S/walks/acme_app-11.json")"
 check "the user is told how to walk it" 1 "$(grep -c 'ready to walk: /pr-autopilot:walk 11 (draft REQUEST_CHANGES saved, nothing was posted)' "$S/notified")"
 check "it counts as handled" 1 "$(grep -cxF "live|review|acme/app|11|$SHA" "$S/handled.tsv")"
+jq --arg c "$W/bin/ci-container" '. + {ci_source: "local", ci_container: $c}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+reset; rm -rf "$S/walks" "$DAVID_STATE"; WALK=true ev review false; FAKE_CLAUDE=review-rc job
+check "walk + ci_source local + ci_container: no ci-local record needed, draft saved, nothing posted" "1 0 0" \
+  "$([ -s "$S/walks/acme_app-11.json" ] && echo 1 || echo 0) $(nwrites 'POST') $(grep -c 'no local CI record' "$S/notified")"
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
 echo "-- walk.sh: post is pinned to the walked head, and refuses when the head moved"
 WK="bash $T/../scripts/walk.sh"; printf 'src/a.txt:2 drops the null check.\n' >"$W/walk-body.md"
 check "draft prints the saved draft" "$SHA" "$($WK draft acme/app 11 | jq -r .head)"
