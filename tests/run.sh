@@ -157,7 +157,7 @@ check "limit hit just now: no job starts" "$n0" "$(jobs_n)"
 rm -f "$S/claude_limited"; : >"$S/seen.tsv"; poll
 check "limit gone: jobs start again" 1 "$([ "$(jobs_n)" -gt "$n0" ] && echo 1 || echo 0)"
 
-echo "== poller: reviewing_mode and mine_mode, each off | notify | act (fresh fixtures and state)"
+echo "== poller: reviewing_mode and mine_mode, each off | notify | walk | act (fresh fixtures and state)"
 oldFIX=$FIX oldS=$S oldST=$PR_AUTOPILOT_STATE
 export FIX=$W/fix-modes PR_AUTOPILOT_STATE=$W/state-modes; S=$PR_AUTOPILOT_STATE
 cp -R "$T/fixtures" "$FIX"
@@ -178,18 +178,24 @@ poll; check "mine notify tells once: a second poll adds nothing" 1 "$(grep -c 'n
 check "mine off: no fix job, no notification" "3 0 0" "$(modes '"act"' '"off"')"
 check "both notify: nothing runs, 4 notifications" "0 0 4" "$(modes '"notify"' '"notify"')"
 check "an unknown value counts as notify, never act" "0 0 4" "$(modes '"typo"' '"typo"')"
+check "reviewing walk: the draft jobs start (3), fix untouched, nothing announced by the poller" "3 1 0" "$(modes '"walk"' '"act"')"
+check "walk jobs carry walk true, other modes false" "3 0" "$(jq -s '[.[] | select(.kind == "review" and .walk == true)] | length' "$S"/events/*.json) $(modes '"act"' '"act"' >/dev/null; jq -s '[.[] | select(.kind == "review" and .walk == true)] | length' "$S"/events/*.json)"
+check "walk is not a mine_mode value: counts as notify, loudly" "3 0 1 1" "$(modes '"act"' '"walk"') $(grep -c 'WARN mine_mode "walk" is not off|notify|act, treating it as notify' "$S/polls.log")"
+mkcfg true '{"reviewing_mode": "walk", "mine_mode": "walk"}'
+check "status: walk is known for reviewing, unknown for mine" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: walk   my PRs: walk (unknown, treated as notify)')"
 modes '"Act"' '"skip"' >/dev/null
-check "a bad value is logged by the poller, for each key" "1 1" "$(grep -c 'WARN reviewing_mode "Act" is not off|notify|act, treating it as notify' "$S/polls.log") $(grep -c 'WARN mine_mode "skip" is not off|notify|act, treating it as notify' "$S/polls.log")"
-check "and reported (throttled: once, the first bad key)" 1 "$(cat "$S/inbox.jsonl" | grep -c 'reviewing_mode \\"Act\\" is not off|notify|act, treating it as notify')"
-check "a valid config logs and reports no such warning" 0 "$(modes '"act"' '"notify"' >/dev/null; grep -c 'is not off|notify|act' "$S/polls.log")"
+check "a bad value is logged by the poller, for each key" "1 1" "$(grep -c 'WARN reviewing_mode "Act" is not off|notify|walk|act, treating it as notify' "$S/polls.log") $(grep -c 'WARN mine_mode "skip" is not off|notify|act, treating it as notify' "$S/polls.log")"
+check "and reported (throttled: once, the first bad key)" 1 "$(cat "$S/inbox.jsonl" | grep -c 'reviewing_mode \\"Act\\" is not off|notify|walk|act, treating it as notify')"
+check "a valid config logs and reports no such warning" 0 "$(modes '"act"' '"notify"' >/dev/null; grep -c "is not off|notify" "$S/polls.log")"
 mkcfg true '{"reviewing_mode": "Act", "mine_mode": "skip"}'
 check "status shows the raw bad values and says how they are treated" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: Act (unknown, treated as notify)   my PRs: skip (unknown, treated as notify)')"
 check "dry-run stays on alongside act (jobs carry dry_run true)" 1 "$(modes '"act"' '"act"' >/dev/null; jq -s -r '[.[] | select(.[0] == "review" and .[4] == true)] | length > 0 | if . then 1 else 0 end' "$S/jobs.log")"
 mkcfg true; echo "== ctl.sh mode"
 bash "$T/../scripts/ctl.sh" mode mine notify >/dev/null; bash "$T/../scripts/ctl.sh" mode reviewing off >/dev/null
 check "ctl mode writes both keys" "notify off" "$(jq -r '"\(.mine_mode) \(.reviewing_mode)"' "$PR_AUTOPILOT_CONFIG")"
+check "ctl mode takes walk for reviewing, not for mine" "2 notify 0 walk" "$(bash "$T/../scripts/ctl.sh" mode mine walk >/dev/null 2>&1; echo -n "$? "; echo -n "$(jq -r .mine_mode "$PR_AUTOPILOT_CONFIG") "; bash "$T/../scripts/ctl.sh" mode reviewing walk >/dev/null 2>&1; echo -n "$? "; jq -r .reviewing_mode "$PR_AUTOPILOT_CONFIG")"
 check "ctl mode rejects a bad value and leaves the config alone" "2 notify" "$(bash "$T/../scripts/ctl.sh" mode mine nope >/dev/null 2>&1; echo -n "$? "; jq -r .mine_mode "$PR_AUTOPILOT_CONFIG")"
-check "status shows both" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: off   my PRs: notify')"
+check "status shows both" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: walk   my PRs: notify')"
 FIX=$oldFIX S=$oldS; export FIX PR_AUTOPILOT_STATE=$oldST
 
 echo "== poller: ci_source local runs ci-local one PR at a time, and its record drives the CI fix"
@@ -280,9 +286,9 @@ ev() { # ev <kind> <dry_run> [head]
   [ "$1" = conflict ] && { key="conflict|acme/app|11|${3:-$SHA}|base"; who="the base branch"; }
   [ "$1" = cilocal ] && { key="cilocal|acme/app|11|${3:-$SHA}"; who="local CI"; }
   jq -n --arg k "$1" --argjson d "$2" --arg a "${ASSOC:-MEMBER}" --arg h "${3:-$SHA}" --arg key "$key" --arg who "$who" --argjson cr "$cr" \
-    --arg au "${AUTHOR:-me}" \
+    --arg au "${AUTHOR:-me}" --argjson walk "${WALK:-false}" \
     '{kind:$k, key:$key, repo:"acme/app", number:11, head:$h, branch:"feature-11", base:"main",
-      title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d, author:$au}' >"$W/ev.json"
+      title:"PR 11 title", url:"https://x/11", attempt:0, who:$who, cr:$cr, thread:"t1", reason:"x", author_assoc:$a, dry_run:$d, author:$au, walk:$walk}' >"$W/ev.json"
 }
 job() { bash "$T/../scripts/job.sh" "$W/ev.json"; }
 reset() { rm -rf "$S/logs" "$S/fake" "$S/writes.log" "$S/handled.tsv" "$S/failed.tsv" "$S/notified" "$S/claude."*; }
@@ -321,6 +327,22 @@ check "report says verified" 1 "$(grep -c "I posted REQUEST_CHANGES (verified on
 FAKE_CLAUDE=review job
 check "never double-posts for the same head" 1 "$(nwrites 'POST .*reviews')"
 check "and says so" 1 "$(grep -c 'I did not post: I already reviewed this commit' "$S/notified")"
+
+echo "-- review, walk mode (live): nothing posted, draft saved, user told"
+reset; rm -rf "$S/walks"; WALK=true ev review false; FAKE_CLAUDE=review-rc job
+check "walk posts nothing to GitHub" 0 "$(nwrites 'POST')"
+check "the draft is saved with the head sha and findings" "$SHA REQUEST_CHANGES 1" "$(jq -r '"\(.head) \(.verdict) \(.body | contains("src/a.txt:2") | if . then 1 else 0 end)"' "$S/walks/acme_app-11.json")"
+check "the user is told how to walk it" 1 "$(grep -c 'ready to walk: /pr-autopilot:walk 11 (draft REQUEST_CHANGES saved, nothing was posted)' "$S/notified")"
+check "it counts as handled" 1 "$(grep -cxF "live|review|acme/app|11|$SHA" "$S/handled.tsv")"
+echo "-- walk.sh: post is pinned to the walked head, and refuses when the head moved"
+WK="bash $T/../scripts/walk.sh"; printf 'src/a.txt:2 drops the null check.\n' >"$W/walk-body.md"
+check "draft prints the saved draft" "$SHA" "$($WK draft acme/app 11 | jq -r .head)"
+check "head and state of the PR" "$SHA open" "$($WK head acme/app 11)"
+: >"$S/writes.log"
+check "head moved: exit 3, nothing posted" "3 0" "$($WK post acme/app 11 deadbeef REQUEST_CHANGES "$W/walk-body.md" >"$W/walk.out" 2>&1; echo -n "$? "; nwrites POST)"
+check "and it says the head moved" 1 "$(grep -c "NOT POSTED: the PR is now '$SHA open', you walked deadbeef" "$W/walk.out")"
+check "head unchanged: posts once, pinned to that sha" "0 POST repos/acme/app/pulls/11/reviews event=REQUEST_CHANGES commit_id=$SHA" "$($WK post acme/app 11 "$SHA" REQUEST_CHANGES "$W/walk-body.md" >/dev/null 2>&1; echo -n "$? "; grep POST "$S/writes.log")"
+check "a bad event is refused" 2 "$($WK post acme/app 11 "$SHA" MERGE "$W/walk-body.md" >/dev/null 2>&1; echo $?)"
 
 echo "-- review: a PR too large for one diff call falls back to per-file patches"
 cat >"$FIX/files-11.json" <<'J'
@@ -934,7 +956,7 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.5.0 and the installer reports it" "0.5.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.5.0')"
+check "plugin version is 0.6.0 and the installer reports it" "0.6.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.6.0')"
 if ! command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
   (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1

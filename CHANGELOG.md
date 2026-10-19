@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- `reviewing_mode` gains `walk` (`off | notify | walk | act`; default still `act`). On a review request nothing is posted on GitHub: the reviewer prepares a private draft (findings with file:line and the head sha), saved locally, and you are told "ready to walk: /pr-autopilot:walk N".
+- New `/pr-autopilot:walk <PR>` (any PR, any mode): walks you through the diff in source order, one logical block at a time, with the draft findings next to their block and questions answered from the code at the head. At the end you pick approve / request changes / comment / nothing and which findings to include. It posts only on that pick, pinned to the head it walked; if the head moved it refuses, says so and offers to re-walk the new part.
+- `walk` is for `reviewing_mode` only; for `mine_mode` it is an unknown value (treated as notify, loudly). Unknown values stay loud; `/pr-autopilot:mode`, status and setup know `walk`.
+
 ## 0.5.0
 
 - Two independent switches, each `off | notify | act`, default `act` (no change for existing users):

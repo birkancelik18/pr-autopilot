@@ -30,10 +30,10 @@ case ${1:-} in
     echo "Next poll will also act on older unread notifications (live mode only)."
     ;;
   mode)
-    # ctl.sh mode <reviewing|mine> <off|notify|act>
+    # ctl.sh mode <reviewing|mine> <off|notify|act>; reviewing also takes walk
     case ${2:-} in reviewing) k=reviewing_mode ;; mine) k=mine_mode ;; *) k= ;; esac
-    case ${3:-} in off|notify|act) ;; *) k= ;; esac
-    [ -n "$k" ] || { echo "usage: ctl.sh mode <reviewing|mine> <off|notify|act>" >&2; exit 2; }
+    mode_ok "$k" "${3:-}" || k=
+    [ -n "$k" ] || { echo "usage: ctl.sh mode <reviewing|mine> <off|notify|act> (walk: reviewing only)" >&2; exit 2; }
     [ -f "$CONFIG" ] || { echo "No config at $CONFIG (run /pr-autopilot:setup)" >&2; exit 1; }
     tmpc=$(mktemp "$CONFIG.XXXXXX") && jq --arg k "$k" --arg v "$3" '.[$k] = $v' "$CONFIG" >"$tmpc" && mv "$tmpc" "$CONFIG" ||
       { rm -f "$tmpc"; echo "could not update $CONFIG" >&2; exit 1; }
@@ -44,7 +44,7 @@ case ${1:-} in
     [ -f "$STATE_DIR/paused" ] && echo "State: PAUSED" || echo "State: active"
     if [ -f "$CONFIG" ]; then
       echo "dry_run: $(cfgd dry_run true)   repos: $(cfg '.repos | keys | join(", ")')"
-      echo "reviewing others: $(mode_show reviewing_mode)   my PRs: $(mode_show mine_mode)   (off | notify | act)"
+      echo "reviewing others: $(mode_show reviewing_mode)   my PRs: $(mode_show mine_mode)   (off | notify | walk | act; mine has no walk)"
     else
       echo "No config at $CONFIG (run /pr-autopilot:setup)"
     fi

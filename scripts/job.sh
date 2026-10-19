@@ -521,6 +521,15 @@ finish_review() {
   fi
 
   check_head
+  # walk mode: nothing goes to GitHub. The draft is kept for /pr-autopilot:walk, which posts only on the user's pick.
+  if [ "$(g '.walk // false')" = true ]; then
+    mkdir -p "$STATE_DIR/walks"
+    jq -n --arg repo "$repo" --argjson n "$n" --arg head "$head" --arg verdict "$event" --arg title "$title" \
+      --arg url "$url" --arg body "$(cat "$JOB/body.md")" \
+      '{repo: $repo, number: $n, head: $head, verdict: $verdict, title: $title, url: $url, body: $body}' \
+      >"$STATE_DIR/walks/$slug-$n.json" || fail "could not save the walk draft"
+    succeed "ready to walk: /pr-autopilot:walk $n (draft $event saved, nothing was posted): $why"
+  fi
   local already assoc
   already=$(gh_get --paginate "repos/$repo/pulls/$n/reviews" | jq -s --arg me "$me" --arg h "$head" \
     '[add[] | select(.user.login == $me and .commit_id == $h and (.state == "APPROVED" or .state == "CHANGES_REQUESTED"))] | length') ||

@@ -10,16 +10,20 @@ cfg() { jq -r "$1" "$CONFIG"; } # usage: cfg '.slack_webhook // ""'
 # cfgd <key> <default-json>: like cfg but keeps an explicit false (jq's // would replace it).
 cfgd() { jq -r --argjson d "$2" ".$1 as \$v | if \$v == null then \$d else \$v end" "$CONFIG"; }
 
-# mode_of <config key>: off | notify | act. Missing means act (today's behaviour). An unknown value
+# mode_of <config key>: off | notify | walk | act. Missing means act (today's behaviour). An unknown value
 # means notify: fail closed to "tell me, do nothing" rather than acting on a typo.
+mode_ok() { # mode_ok <config key> <value>: walk only makes sense for reviewing_mode
+  case $2 in off|notify|act) return 0 ;; walk) [ "$1" = reviewing_mode ] ;; *) return 1 ;; esac
+}
+mode_list() { [ "$1" = reviewing_mode ] && echo "off|notify|walk|act" || echo "off|notify|act"; }
 mode_of() {
   local v; v=$(cfgd "$1" '"act"')
-  case $v in off|notify|act) echo "$v" ;; *) echo notify ;; esac
+  if mode_ok "$1" "$v"; then echo "$v"; else echo notify; fi
 }
 # mode_show <config key>: the raw value, marked when mode_of would not take it as written.
 mode_show() {
   local v; v=$(cfgd "$1" '"act"')
-  case $v in off|notify|act) echo "$v" ;; *) echo "$v (unknown, treated as notify)" ;; esac
+  if mode_ok "$1" "$v"; then echo "$v"; else echo "$v (unknown, treated as notify)"; fi
 }
 
 # with_timeout <seconds> <command...>: runs an external command, stopped (TERM, then KILL) after <seconds>;

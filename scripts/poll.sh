@@ -60,16 +60,15 @@ fi
 echo "$mode" >"$STATE_DIR/mode"
 live_since=$(cat "$STATE_DIR/live_since" 2>/dev/null || echo 1970-01-01T00:00:00Z)
 
-# Two switches, each off | notify | act (default act): reviewing_mode = review requests where I am the
+# Two switches, each off | notify | walk | act (default act): reviewing_mode = review requests where I am the
 # reviewer, mine_mode = review feedback on PRs I wrote. off: ignored. notify: one report per event
 # (notify_only below), nothing posted, fixed or pushed. act: today's behaviour. They combine with
 # review_enabled / fix_enabled (false there still means nothing happens).
 rmode=$(mode_of reviewing_mode) mmode=$(mode_of mine_mode)
 for k in reviewing_mode mine_mode; do # a typo acts as notify, but never silently
-  case $(cfgd "$k" '"act"') in off|notify|act) ;; *)
-    log "WARN $k \"$(cfgd "$k" '"act"')\" is not off|notify|act, treating it as notify"
-    report_throttled "$k \"$(cfgd "$k" '"act"')\" is not off|notify|act, treating it as notify" ;;
-  esac
+  mode_ok "$k" "$(cfgd "$k" '"act"')" || {
+    log "WARN $k \"$(cfgd "$k" '"act"')\" is not $(mode_list "$k"), treating it as notify"
+    report_throttled "$k \"$(cfgd "$k" '"act"')\" is not $(mode_list "$k"), treating it as notify"; }
 done
 rok=$([ "$rmode" != off ] && cfgd review_enabled true || echo false)
 fok=$([ "$mmode" != off ] && cfgd fix_enabled true || echo false)
@@ -285,7 +284,8 @@ PR #$n ($(jq -r .title <<<"$ev")): new review feedback keeps coming after $np fe
   file="$STATE_DIR/events/$(date +%Y%m%dT%H%M%S)-${repo//\//_}-$n.json"
   thread=$(jq -r .thread <<<"$item")
   jq -c --argjson dry "$dry" --arg thread "$thread" --arg reason "$reason" --argjson attempt "$nfail" \
-    '. + {dry_run: $dry, thread: $thread, reason: $reason, attempt: $attempt}' <<<"$ev" >"$file"
+    --argjson walk "$([ "$rmode" = walk ] && echo true || echo false)" \
+    '. + {dry_run: $dry, thread: $thread, reason: $reason, attempt: $attempt, walk: $walk}' <<<"$ev" >"$file"
   nohup "$JOB" "$file" >/dev/null 2>&1 </dev/null &
   echo "$key" >"$STATE_DIR/running/$!"
   log "started job for $key (pid $!)"
