@@ -105,6 +105,34 @@ gh() {
   return "$rc"
 }
 is_paused() { [ -f "$STATE_DIR/paused" ]; }
+
+# claude_limited holds the epoch the pause ends (job.sh writes it); an empty file (older version) means 30 minutes from its mtime.
+limit_active() {
+  local f="$STATE_DIR/claude_limited" until
+  [ -e "$f" ] || return 1
+  until=$(cat "$f" 2>/dev/null)
+  case $until in
+    '' | *[!0-9]*) [ -n "$(find "$f" -mmin -30 2>/dev/null)" ] ;;
+    *) [ "$(date +%s)" -lt "$until" ] ;;
+  esac
+}
+# limit_until <claude's message>: epoch when the limit resets ("resets 3:20pm (Europe/Istanbul)"), else now + 30 min.
+# ponytail: only today/tomorrow clock times; "resets Oct 21, 3am" style falls back to 30 minutes.
+limit_until() {
+  local now t tz e
+  now=$(date +%s)
+  t=$(grep -oiE 'resets [0-9]{1,2}(:[0-9]{2})?[[:space:]]*[ap]m' <<<"$1" | head -1 | sed -E 's/^[Rr]esets //' | tr -d ' ' | tr 'A-Z' 'a-z')
+  tz=$(grep -oE 'resets [^(]*\(([A-Za-z_]+/[A-Za-z_+-]+|UTC)\)' <<<"$1" | head -1 | sed -E 's/.*\(([^)]*)\)/\1/')
+  if [ -n "$t" ]; then
+    case $t in *:*) ;; *) t=${t%[ap]m}:00${t: -2} ;; esac
+    e=$(${tz:+env TZ="$tz"} date -j -f '%I:%M%p %S' "$t 00" +%s 2>/dev/null || ${tz:+env TZ="$tz"} date -d "$t" +%s 2>/dev/null)
+    case $e in '' | *[!0-9]*) ;; *)
+      [ "$e" -gt "$now" ] || e=$((e + 86400))
+      if [ "$e" -le $((now + 86400)) ]; then echo $((e + 60)); return; fi ;;
+    esac
+  fi
+  echo $((now + 1800))
+}
 # Bot logins whose review threads are feedback (config review_bots); any other bot is not.
 review_bots() { jq -c '(.review_bots | arrays) // ["coderabbitai[bot]"]' "$CONFIG"; }
 

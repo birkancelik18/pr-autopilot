@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0
+
+- Fix: wasted attempts. Claude's org monthly spend limit ("You've hit your org's monthly spend limit ... your session limit resets 3:20pm (Europe/Istanbul)"), usage limits and session limits all failed a job as "claude exited with status 1", three times in a row, and the job gave up (only the exact phrase "hit your session limit" was recognised). Any of these is now treated as a limit: the run does not count as an attempt, no job starts until the reset time named in the message (30 minutes when none is given), and you get one notification, not one per job.
+- Cost: reviews of big PRs cost $12-16 per run (over `max_cost_usd_per_job`), almost all of it the review passes reading a ~1 MB diff. Now: an incremental review (only the changes since the commit you last reviewed, earlier points re-checked) instead of the whole PR on every round; lock/generated/vendored/minified files become stubs; a diff size cap (`max_diff_kb`, derived from `max_cost_usd_per_job` by default) with a clear note to the model; the rewrite step runs on a cheaper model (`rewrite_model`, default `haiku`) and is skipped once the cost cap is reached (owner notified, nothing posted, no retry). Each Claude run logs a `phase` line with tokens by model.
+
 ## 0.6.2
 
 - Fewer pushes per review round (each push costs a full CI run). Only one job per PR runs at a time; a trigger that arrives while one runs (new comment, conflict) waits and is handled by the next job, which starts from the pushed head. Before, a new comment key could start a second parallel fix job on the same PR.

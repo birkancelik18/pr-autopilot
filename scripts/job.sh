@@ -223,6 +223,35 @@ if [ "$kind" = review ]; then
     cp "$p" "$JOB/review-skills/$i-$name" || fail "could not copy review skill '$p'"
   done < <(jq -r '(.review_skills // [])[]' "$CONFIG")
   npasses=$((3 + i))
+
+  # Review cost control. Tokens go to every pass (and the blend) reading diff.patch, so the diff is what costs.
+  # 1. Not the first review of this PR: only what changed since the commit we last reviewed (the skill re-checks
+  #    the earlier points from reviews.json). 2. Generated/lock/vendored files and anything past a size cap become
+  #    one-line stubs. The cap derives from max_cost_usd_per_job, so the budget is enforced up front.
+  diff_note=""
+  last=$(jq -r --arg me "$me" '[.[] | select(.user.login == $me and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | last | .commit_id // empty' "$JOB/reviews.json")
+  if [ -n "$last" ] && [ "$last" != "$head" ] && git -C "$clone" merge-base --is-ancestor "$last" "$head" 2>/dev/null &&
+    git -C "$clone" diff "$last" "$head" >"$JOB/diff.incr.patch" 2>>"$LOG" && [ -s "$JOB/diff.incr.patch" ]; then
+    mv "$JOB/diff.incr.patch" "$JOB/diff.patch"
+    diff_note="# INCREMENTAL REVIEW: diff.patch holds only the changes since ${last:0:7}, the commit you last reviewed. Review these changes in their context in the checkout, and re-check your earlier points against the current code. Do not re-review the rest of the PR."
+    echo "incremental review: diff since ${last:0:7} instead of the whole PR" >>"$LOG"
+  fi
+  rm -f "$JOB/diff.incr.patch"
+  max_cost=$(cfgd max_cost_usd_per_job 10)
+  # ponytail: $0.004 per KB of diff per reader, fitted on a 970 KB PR that cost $15.8 with 4 readers; override with max_diff_kb.
+  cap_kb=$(cfgd max_diff_kb "$(awk -v m="$max_cost" -v p="$npasses" 'BEGIN {printf "%d", m / (p + 1) / 0.004}')")
+  # lock files, generated and vendored code, minified bundles, source maps, snapshots, images
+  NOISE='(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|npm-shrinkwrap\.json|go\.sum|[^/]*\.lock|[^/]*\.lock\.json)$|(^|/)(vendor|node_modules|dist|__generated__|generated)/|\.generated\.|(^|/)generated\.[a-z.]+$|\.min\.(js|css)$|\.map$|\.snap$|_pb2(_grpc)?\.py$|\.pb\.go$|\.svg$'
+  dbytes=$(wc -c <"$JOB/diff.patch" | tr -d ' ')
+  stats=$(NOISE="$NOISE" awk -v cap=$((cap_kb * 1024)) -f "$DIR/trim_diff.awk" "$JOB/diff.patch" 2>&1 >"$JOB/diff.trim.patch") || fail "could not trim the diff"
+  mv "$JOB/diff.trim.patch" "$JOB/diff.patch"
+  noise_n=${stats#noise=}; noise_n=${noise_n%% *}; over_n=${stats##*over=}
+  if [ "${noise_n:-0}" -gt 0 ] || [ "${over_n:-0}" -gt 0 ]; then
+    diff_note="$diff_note
+# DIFF TRIMMED to save cost: $noise_n generated/lock/vendored file(s) skipped and $over_n file(s) omitted over the ${cap_kb} KB cap (max_diff_kb, derived from max_cost_usd_per_job=$max_cost). Each has a stub line; read those files in the checkout only if they matter. Say in the review that part of the diff was not read."
+  fi
+  [ -z "$diff_note" ] || { { echo "$diff_note"; cat "$JOB/diff.patch"; } >"$JOB/diff.patch.tmp" && mv "$JOB/diff.patch.tmp" "$JOB/diff.patch"; }
+  echo "diff for the model: $((dbytes / 1024)) KB -> $(($(wc -c <"$JOB/diff.patch") / 1024)) KB (cap ${cap_kb} KB; $stats)" >>"$LOG"
 fi
 
 # --- merge conflict: merge the base into the PR head here; the model resolves only what conflicts.
@@ -307,11 +336,11 @@ stall_s=${PR_AUTOPILOT_STALL_SECONDS:-$(($(cfgd stall_minutes 8) * 60))} # env: 
 cd "$WT" || fail "cannot enter worktree"
 abort_if_paused
 total_cost=0
-# run_claude <prompt> <out.jsonl>: sets rc. Own process group so pause or the timeout kill all of it.
+# run_claude <prompt> <out.jsonl> [model]: sets rc. Own process group so pause or the timeout kill all of it.
 run_claude() {
   rm -f "$PR_AUTOPILOT_TRANSIENT_FILE" # a tolerated gh failure earlier must not excuse a claude failure
   set -m
-  claude -p "$1" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
+  claude -p "$1" ${3:+--model "$3"} --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
     --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
     --add-dir "$JOB" --allowedTools "$(join "${allow[@]}")" --disallowedTools "$(join "${deny[@]}")" \
     --output-format stream-json --verbose --no-session-persistence </dev/null >"$2" 2>>"$LOG" &
@@ -344,6 +373,8 @@ run_claude() {
   fi
   jq -c 'select(.type == "result")' "$2" 2>/dev/null | tail -1 >"$2.result"
   total_cost=$(awk -v t="$total_cost" -v c="$(jq -r '.total_cost_usd // 0' "$2.result" 2>/dev/null)" 'BEGIN {printf "%.4f", t + c}')
+  # Where the tokens went, per run (phase).
+  echo "phase $(basename "$2" .jsonl): $(jq -r '"cost_usd=\(.total_cost_usd // 0) " + ([.modelUsage // {} | to_entries[] | "\(.key) in=\(.value.inputTokens) out=\(.value.outputTokens) cache_read=\(.value.cacheReadInputTokens) cache_write=\(.value.cacheCreationInputTokens)"] | join("; "))' "$2.result" 2>/dev/null)" >>"$LOG"
 }
 # Cost is reported, never enforced: one line in the log and a notification if over max_cost_usd_per_job.
 cost_check() {
@@ -365,14 +396,18 @@ if [ -z "$skip_model" ]; then
     | group_by(.m) | map(map(.c[]) | unique | length) | max // 0' "$JOB/claude.jsonl" 2>/dev/null || echo 0)
   echo "stats: agent_calls=${agent_calls:-0} max_agents_in_one_message=${agent_parallel:-0} $(jq -r '"num_turns=\(.num_turns) duration_ms=\(.duration_ms) cost_usd=\(.total_cost_usd)"' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
   echo "permission denials: $(jq -r '.permission_denials | length' "$JOB/claude.json" 2>/dev/null)" >>"$LOG"
-  # A spent plan is not this PR's fault: no attempt burned, and the poller starts no jobs for 30 minutes.
-  # Only claude's own final error result counts: the phrase may sit in PR content in tool results.
-  if [ "$rc" -ne 0 ] && jq -e '.is_error == true and ((.result // "") | test("hit your session limit"))' "$JOB/claude.json" >/dev/null 2>&1 &&
+  # A spent plan (session, usage or org monthly spend limit) is not this PR's fault: no attempt burned, and the
+  # poller starts no jobs until the reset time claude names (else 30 minutes). Only claude's own final error
+  # result counts: the phrase may sit in PR content in tool results.
+  if [ "$rc" -ne 0 ] && jq -e '.is_error == true and ((.result // "") | test("hit your .*(session|usage|spend) limit|reached your .*usage limit|usage limit reached"; "i"))' "$JOB/claude.json" >/dev/null 2>&1 &&
     [ "$(transient_count)" -lt 5 ]; then
     note_transient
-    echo "claude session limit reached, job not counted as an attempt" >>"$LOG"
-    log "$repo#$n: claude session limit reached, pausing job starts for 30 minutes"
-    touch "$STATE_DIR/claude_limited"
+    msg=$(jq -r '.result // ""' "$JOB/claude.json")
+    first=1; limit_active && first=""
+    limit_until "$msg" >"$STATE_DIR/claude_limited"
+    echo "claude limit reached ($msg), job not counted as an attempt" >>"$LOG"
+    log "$repo#$n: claude limit reached, pausing job starts until $(date -r "$(cat "$STATE_DIR/claude_limited")")"
+    [ -z "$first" ] || report "$prefix Claude usage limit hit: \"$(head -c 200 <<<"$msg")\". No job starts until $(date -r "$(cat "$STATE_DIR/claude_limited")" '+%H:%M'); nothing counted as a failure."
     exit 0
   fi
   [ "$rc" -eq 0 ] || fail "claude exited with status $rc (143 or 137 usually means the timeout)"
@@ -406,7 +441,16 @@ finish_review() {
     [ -z "$tells" ] || fixes="${fixes}It reads machine-written, so rewrite it by $JOB/voice.md and remove: $tells. "
     echo "draft is $body_words words${tells:+ and has $tells}, asking for a rewrite" >>"$LOG"
     abort_if_paused
-    run_claude "REWRITE the review draft at $JOB/draft.md: ${fixes}Keep the first line (VERDICT) exactly as it is, keep every blocker with its file:line and failure, and keep the findings and their severity. Edit that file only. Do not review anything again. job_dir=$JOB" "$JOB/claude-rewrite.jsonl"
+    # The cost cap is enforced here: a review that already spent the budget gets no further model run, and is
+    # not retried either (a retry would spend the budget again). The draft stays in the job dir.
+    if awk -v t="$total_cost" -v m="$(cfgd max_cost_usd_per_job 10)" 'BEGIN {exit !(t >= m)}'; then
+      echo "cost cap reached (\$$total_cost), skipping the rewrite; draft left in $JOB/draft.md" >>"$LOG"
+      echo "$DKEY" >>"$STATE_DIR/handled.tsv"
+      report "$prefix NEEDS YOU: the review cost \$$total_cost, at max_cost_usd_per_job, so I stopped before the rewrite step and posted nothing. Draft: $JOB/draft.md. Log: $LOG"
+      exit 1
+    fi
+    # The rewrite is mechanical, so it runs on a cheaper model (config rewrite_model, default haiku; "" = same model).
+    run_claude "REWRITE the review draft at $JOB/draft.md: ${fixes}Keep the first line (VERDICT) exactly as it is, keep every blocker with its file:line and failure, and keep the findings and their severity. Edit that file only. Do not review anything again. job_dir=$JOB" "$JOB/claude-rewrite.jsonl" "$(cfgd rewrite_model '"haiku"')"
     cost_check
     [ "$rc" -eq 0 ] || fail "claude exited with status $rc while rewriting the draft"
     verdict2=$(head -1 "$JOB/draft.md" | tr -d '\r')

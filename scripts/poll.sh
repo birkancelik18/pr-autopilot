@@ -176,10 +176,10 @@ settled() {
     $1 == k && $2 == u && (own != "author" || now - ($3 + 0) < age) {found = 1} END {exit !found}' "$SEEN"
 }
 
-# job.sh touches claude_limited when claude reports a spent session limit.
+# job.sh writes claude_limited (the reset epoch) when claude reports a spent session/usage/spend limit.
 limited=""
-if [ -n "$(find "$STATE_DIR/claude_limited" -mmin -30 2>/dev/null)" ]; then
-  limited=1; log "claude session limit hit less than 30 minutes ago, not starting jobs"
+if limit_active; then
+  limited=1; log "claude limit active (until $(date -r "$(cat "$STATE_DIR/claude_limited")" 2>/dev/null || echo "30 minutes after it was hit")), not starting jobs"
 fi
 
 clear_settle() { # forget when this PR's settle wait began (uses process_item's seen_key)

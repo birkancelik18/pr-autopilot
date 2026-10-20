@@ -232,6 +232,13 @@ mkcfg true; : >"$S/seen.tsv"; : >"$S/handled.tsv"; : >"$S/failed.tsv"; n0=$(jobs
 check "limit hit just now: no job starts" "$n0" "$(jobs_n)"
 rm -f "$S/claude_limited"; : >"$S/seen.tsv"; poll
 check "limit gone: jobs start again" 1 "$([ "$(jobs_n)" -gt "$n0" ] && echo 1 || echo 0)"
+mkcfg true; : >"$S/seen.tsv"; : >"$S/handled.tsv"; n0=$(jobs_n); echo $(($(date +%s) + 3600)) >"$S/claude_limited"; poll
+check "limit with a reset time an hour away (file is fresh and old alike): no job starts" "$n0" "$(jobs_n)"
+touch -t 202001010000 "$S/claude_limited"; poll
+check "an old file whose reset epoch is still in the future still pauses" "$n0" "$(jobs_n)"
+echo $(($(date +%s) - 5)) >"$S/claude_limited"; : >"$S/seen.tsv"; poll
+check "reset time passed: jobs start again" 1 "$([ "$(jobs_n)" -gt "$n0" ] && echo 1 || echo 0)"
+rm -f "$S/claude_limited"
 
 echo "== poller: reviewing_mode and mine_mode, each off | notify | walk | act (fresh fixtures and state)"
 oldFIX=$FIX oldS=$S oldST=$PR_AUTOPILOT_STATE
@@ -482,7 +489,7 @@ check "GitHub down through all retries: not an attempt, no report, noted for the
 reset; ev review false; FAKE_GH_FLAKY=99 FAKE_GH_FLAKY_MSG="HTTP 404 Not Found" FAKE_CLAUDE=review job
 check "a non-transient error is not retried and burns an attempt" 1 "$(grep -c 'live|review' "$S/failed.tsv")"
 reset; ev review false; FAKE_CLAUDE=limit job
-check "claude session limit: no attempt burned, no failure report, job starts paused" "0 0 1" \
+check "claude session limit: no attempt burned, one notification, job starts paused" "0 1 1" \
   "$([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(cat "$S/notified" 2>/dev/null | wc -l | tr -d ' ') $([ -e "$S/claude_limited" ] && echo 1 || echo 0)"
 rm -f "$S/claude_limited"
 
@@ -493,6 +500,46 @@ check "session limit cannot loop forever: after 5 unpaid runs in a day it burns 
 rm -f "$S/claude_limited" "$S/transient.tsv"
 reset; ev review false; FAKE_CLAUDE=review-limit-text job
 check "the phrase inside tool results/PR content is not a session limit: normal run, no pause" "1 0" "$(grep -c 'live|review' "$S/handled.tsv") $([ -e "$S/claude_limited" ] && echo 1 || echo 0)"
+reset; rm -f "$S/transient.tsv" "$S/claude_limited"; ev review false; FAKE_CLAUDE=limit-spend job
+check "org monthly spend limit: no attempt burned, one notification, paused until a future reset" "0 1 1" \
+  "$([ -e "$S/failed.tsv" ] && wc -l <"$S/failed.tsv" | tr -d ' ' || echo 0) $(wc -l <"$S/notified" | tr -d ' ') $([ "$(cat "$S/claude_limited")" -gt "$(date +%s)" ] && echo 1 || echo 0)"
+ev review false; FAKE_CLAUDE=limit-spend job
+check "a second job hitting the same limit does not notify again" 1 "$(wc -l <"$S/notified" | tr -d ' ')"
+check "the reset time comes from the message (next 3:20pm Istanbul, within a day), not the 30 minute default" 1 \
+  "$(awk -v u="$(cat "$S/claude_limited")" -v n="$(date +%s)" 'BEGIN {print (u - n > 60 && u - n <= 86400 + 60) ? 1 : 0}')"
+rm -f "$S/claude_limited" "$S/transient.tsv"
+
+echo "-- review cost: incremental diff, trimmed noise, enforced cap"
+NEW=$(git -C "$O" -c user.name=t -c user.email=t@t commit -q --allow-empty -m none && echo x >"$O/src/b.txt" && git -C "$O" add -A && git -C "$O" -c user.name=t -c user.email=t@t commit -q -m second && git -C "$O" rev-parse HEAD)
+git -C "$O" update-ref refs/pull/11/head "$NEW"
+cp "$FIX/pr-11.json" "$W/pr-11.keep"; cp "$FIX/reviews-11.json" "$W/reviews-11.keep"; cp "$FIX/diff.patch" "$W/diff.keep"
+jq --arg s "$NEW" '.head.sha = $s' "$W/pr-11.keep" >"$FIX/pr-11.json"
+jq --arg s "$SHA" '. + [{"id": 950, "state": "COMMENTED", "user": {"login": "me"}, "commit_id": $s}]' "$W/reviews-11.keep" >"$FIX/reviews-11.json"
+reset; ev review false "$NEW"; FAKE_CLAUDE=review job
+jd=$(cat "$S/claude.jobdir")
+check "second round: diff.patch is only the commits since the last reviewed sha, with a note" "1 1 0" \
+  "$(head -1 "$jd/diff.patch" | grep -c '^# INCREMENTAL REVIEW: .*since '"${SHA:0:7}") $(grep -c '^diff --git a/src/b.txt' "$jd/diff.patch") $(grep -c 'src/a.txt' "$jd/diff.patch")"
+reset; jq --arg s "$SHA" '.[-1].commit_id = "0000000000000000000000000000000000000000"' "$FIX/reviews-11.json" >"$W/x" && mv "$W/x" "$FIX/reviews-11.json"
+ev review false "$NEW"; FAKE_CLAUDE=review job; jd=$(cat "$S/claude.jobdir")
+check "last reviewed sha unknown to git (force push): falls back to the whole diff" "0 1" \
+  "$(grep -c INCREMENTAL "$jd/diff.patch") $(grep -c '^diff --git a/src/a.txt' "$jd/diff.patch")"
+cp "$W/reviews-11.keep" "$FIX/reviews-11.json"
+{ cat "$W/diff.keep"
+  printf 'diff --git a/web/package-lock.json b/web/package-lock.json\n--- a/web/package-lock.json\n+++ b/web/package-lock.json\n@@ -1 +1 @@\n-a\n+b\n'
+  printf 'diff --git a/src/big.txt b/src/big.txt\n--- a/src/big.txt\n+++ b/src/big.txt\n@@ -0,0 +1,300 @@\n'; for i in $(seq 1 300); do echo "+line $i of a big file"; done; } >"$FIX/diff.patch"
+jq --arg s "$NEW" '. + {max_diff_kb: 1}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"
+reset; ev review false "$NEW"; FAKE_CLAUDE=review job; jd=$(cat "$S/claude.jobdir")
+check "lock file is a stub, the diff past max_diff_kb is a stub, small diffs stay, the model is told" "1 1 1 0 1" \
+  "$(grep -c '^# skipped: generated, lock' "$jd/diff.patch") $(grep -c '^# omitted: diff size cap' "$jd/diff.patch") $(grep -c '^+y$' "$jd/diff.patch") $(grep -c 'line 1 of a big file' "$jd/diff.patch") $(grep -c '^# DIFF TRIMMED' "$jd/diff.patch")"
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"; cp "$W/pr-11.keep" "$FIX/pr-11.json"; cp "$W/diff.keep" "$FIX/diff.patch"
+git -C "$O" update-ref refs/pull/11/head "$SHA"
+reset; ev review false; FAKE_CLAUDE=review-long job
+check "the rewrite step runs on the cheaper model and the log shows per-phase usage" "1 1" \
+  "$(grep -c -x -- '--model' "$S/claude.args") $(grep -c '^phase claude-rewrite:' "$S/logs/"*review.log)"
+reset; jq '. + {max_cost_usd_per_job: 0.1}' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"; ev review false; FAKE_CLAUDE=review-long job
+check "cost cap reached after the review: no rewrite run, nothing posted, not retried, owner told" "0 1 1" \
+  "$(grep -c 'REWRITE' "$S/claude.args") $(grep -c 'NEEDS YOU: the review cost' "$S/notified") $(grep -c 'live|review' "$S/handled.tsv")"
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
 echo "-- a write the server applied before answering 502 is never sent twice"
 reset; rm -f "$S/posted-comments.json"; ev review false; FAKE_WRITE_502=1 FAKE_CLAUDE=review job
 check "review: POST answered 502 but applied: read back, exactly one review, success" "1 1" "$(nwrites 'POST .*reviews') $(grep -c 'live|review' "$S/handled.tsv")"
@@ -924,7 +971,7 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.6.2 and the installer reports it" "0.6.2 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.6.2')"
+check "plugin version is 0.7.0 and the installer reports it" "0.7.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.7.0')"
 if ! command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
   (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1
