@@ -344,7 +344,7 @@ total_cost=0
 run_claude() {
   rm -f "$PR_AUTOPILOT_TRANSIENT_FILE" # a tolerated gh failure earlier must not excuse a claude failure
   set -m
-  claude -p "$1" ${3:+--model "$3"} --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
+  claude -p "$1" --model "${3:-${PR_AUTOPILOT_MODEL:-sonnet}}" --plugin-dir "$PLUGIN_ROOT" --permission-mode dontAsk \
     --setting-sources "" --strict-mcp-config --settings '{"disableAllHooks":true}' \
     --add-dir "$JOB" --allowedTools "$(join "${allow[@]}")" --disallowedTools "$(join "${deny[@]}")" \
     --output-format stream-json --verbose --no-session-persistence </dev/null >"$2" 2>>"$LOG" &
