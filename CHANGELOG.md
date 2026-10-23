@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 - New config key `review_max_changed_lines` (additions + deletions as GitHub reports them; missing, null or 0 = no limit). A review request for a larger PR starts no job; you are told once per PR head ("skipped review, N changed lines is over your M-line limit"). A smaller PR or a new head is evaluated again. Fix, conflict and CI-fix jobs on your own PRs are unchanged. A string, negative or fractional value stops the poller with a loud report instead of silently disabling the limit (that report has its own hourly throttle, so another error never swallows it). If a limit is set and GitHub gives no size for a PR, the review is skipped and you are told once per head.
 
