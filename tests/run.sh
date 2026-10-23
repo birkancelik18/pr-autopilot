@@ -880,7 +880,7 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.6.0 and the installer reports it" "0.6.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.6.0')"
+check "plugin version is 0.6.1 and the installer reports it" "0.6.1 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.6.1')"
 if ! command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
   (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1
