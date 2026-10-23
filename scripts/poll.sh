@@ -14,6 +14,11 @@ is_paused && { log "paused"; exit 0; }
 jq -e '.repos | type == "object" and length > 0' "$CONFIG" >/dev/null 2>&1 ||
   { report_throttled "pr-autopilot: $CONFIG is unreadable or has no repos, doing nothing"; exit 1; }
 
+# review_max_changed_lines: a non-negative integer (0 or missing = no limit). Anything else fails loudly:
+# silently ignoring a typo would review the PRs the owner wanted skipped.
+jq -e '.review_max_changed_lines | . == null or (type == "number" and . >= 0 and . == floor)' "$CONFIG" >/dev/null 2>&1 ||
+  { report_throttled "pr-autopilot: review_max_changed_lines in $CONFIG must be a whole number, 0 or more (got $(jq -c .review_max_changed_lines "$CONFIG")), doing nothing"; exit 1; }
+
 # Lock: mkdir is atomic; the pid file is written via temp+mv so a reader never sees it half written.
 LOCK=$STATE_DIR/poll.lock
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -83,7 +88,8 @@ flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson ci_enabled "$(cfgd ci_fix_enabled true)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")"
-  --argjson review_bots "$(review_bots)")
+  --argjson review_bots "$(review_bots)"
+  --argjson review_max "$(cfgd review_max_changed_lines 0)")
 # Feedback-fix cap (config max_feedback_fixes {per_head, per_pr}): a review bot and the fixer answering
 # each other must not loop. job.sh records each finished fix in fixes.tsv: "mode|repo|n<TAB>head".
 MAX_FIX_HEAD=$(jq -r '(.max_feedback_fixes | objects | .per_head) // 3' "$CONFIG")
@@ -204,7 +210,17 @@ process_item() {
   [ "$(jq -r .untrusted <<<"$ev")" = 0 ] ||
     log "$repo#$n: ignoring $(jq -r .untrusted <<<"$ev") comment(s)/review(s) from untrusted authors (not owner/member/collaborator, not in trusted_commenters)"
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
-    log "skip $repo#$n: $(jq -r .skip <<<"$ev")"; settle; return 0
+    log "skip $repo#$n: $(jq -r .skip <<<"$ev")"
+    # Too large to review: tell the owner once per head (size-skipped.tsv), like ci-gave-up.tsv.
+    if [ "$(jq -r '.lines // ""' <<<"$ev")" != "" ]; then
+      local sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
+      if ! grep -qxF "$sk" "$STATE_DIR/size-skipped.tsv" 2>/dev/null; then
+        echo "$sk" >>"$STATE_DIR/size-skipped.tsv"
+        report "$(jq -r .url <<<"$ev")
+PR #$n ($(jq -r .title <<<"$ev")): skipped review, $(jq -r .lines <<<"$ev") changed lines is over your $(cfgd review_max_changed_lines 0)-line limit (review_max_changed_lines)."
+      fi
+    fi
+    settle; return 0
   fi
   key="$mode|$(jq -r .key <<<"$ev")"
   # notify mode: tell the user once per event (its key goes into handled.tsv like a finished job), act on nothing.

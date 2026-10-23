@@ -128,6 +128,36 @@ printf 'dry|cifix|acme/app|12|old1\ndry|cifix|acme/app|12|old2\n' >>"$S/handled.
 jq '.head.sha = "ccc999"' "$FIX/pr-12.json" >"$W/x" && mv "$W/x" "$FIX/pr-12.json"; bump 12; rm -f "$S/notified"
 n5=$(grep -c '"cifix","acme/app",12' "$S/jobs.log"); FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll; bump 12; FAKE_CHECKS=$W/ck-red2.json FAKE_NOTIF_EMPTY=1 poll
 check "after 3 CI fixes: no 4th CI job for #12, the user is told once" "$n5 1" "$(grep -c '"cifix","acme/app",12' "$S/jobs.log") $(grep -c 'PR #12 .*CI is still failing after 3 fix attempts' "$S/notified")"
+echo "== poller: review_max_changed_lines"
+mkcfg true '{"review_max_changed_lines": 1000}'; rm -f "$S/notified"
+szjobs() { grep -c "\"review\",\"acme/app\",11,\"$1\"" "$S/jobs.log"; }
+sznote() { grep -c 'PR #11 .*skipped review, 1834 changed lines is over your 1000-line limit' "$S/notified"; }
+jq '.head.sha = "szz1" | .additions = 1800 | .deletions = 34' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"; bump 11
+FAKE_NOTIF_EMPTY=1 poll
+check "over the limit: no review job, one notification" "0 1" "$(szjobs szz1) $(sznote)"
+bump 11; FAKE_NOTIF_EMPTY=1 poll
+check "second poll, same head: not told again" "0 1" "$(szjobs szz1) $(sznote)"
+jq '.head.sha = "szz2"' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"; bump 11
+FAKE_NOTIF_EMPTY=1 poll
+check "new head, still over: told once more" "0 2" "$(szjobs szz2) $(sznote)"
+jq '.head.sha = "szz3" | .additions = 600 | .deletions = 400' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"; bump 11
+FAKE_NOTIF_EMPTY=1 poll
+check "exactly at the limit (1000 lines): the review runs" "1 2" "$(szjobs szz3) $(sznote)"
+jq '.head.sha = "szz4" | .additions = 1800' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"
+for v in null 0; do
+  mkcfg true "{\"review_max_changed_lines\": $v}"; bump 11; FAKE_NOTIF_EMPTY=1 poll
+done
+check "limit null or 0: no limit, the big PR is reviewed" "1" "$(szjobs szz4)"
+mkcfg true; jq '.head.sha = "szz5"' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"; bump 11; FAKE_NOTIF_EMPTY=1 poll
+check "limit unset: no limit" "1" "$(szjobs szz5)"
+for bad in '"1000"' -5 1.5 true; do
+  mkcfg true "{\"review_max_changed_lines\": $bad}"; rm -f "$S/notified" "$S/last_error_report"; before=$(jobs_n)
+  PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
+  check "bad review_max_changed_lines $bad: poller exits non-zero, reports it, starts nothing" "1 1 $before" \
+    "$rc $(grep -c 'review_max_changed_lines .* must be a whole number' "$S/notified") $(jobs_n)"
+done
+mkcfg true
+
 echo "== poller: network blips are quiet, failed.tsv only lists active failures"
 mkcfg true; rm -f "$S/notified" "$S/last_error_report" "$S/poll_failures"
 for i in 1 2 3 4; do FAKE_GH_FAIL="GET user" poll >/dev/null 2>&1; done

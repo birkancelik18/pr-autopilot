@@ -3,6 +3,7 @@
 #       --argjson ignore (extra bot logins) --argjson trusted (extra trusted commenters)
 #       --argjson review_bots (bot logins whose review threads count, e.g. ["coderabbitai[bot]"])
 #       --argjson via_search (true when the review request came from the search source)
+#       --argjson review_max (optional: review_max_changed_lines, 0 = no limit)
 #       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled/ci_enabled
 #       --slurpfile threads (review_threads in lib.sh: [{id, resolved, comments: [{id, login, assoc}]}],
 #       [] when not fetched)
@@ -77,6 +78,9 @@ def maxid: if length == 0 then null else max_by(.id) end;
       elif ([$rv[] | select(.user.login == $me and .commit_id == $p.head.sha
           and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | length) > 0 then
         {skip: "already reviewed this head"}
+      # Over review_max_changed_lines (additions + deletions, 0 or missing = no limit): poll.sh tells the owner once per head.
+      elif (($ARGS.named.review_max // 0) > 0) and (($p.additions // 0) + ($p.deletions // 0)) > $ARGS.named.review_max then
+        {skip: "review too large", lines: (($p.additions // 0) + ($p.deletions // 0))}
       else {kind: "review", key: "review|\($repo)|\($p.number)|\($p.head.sha)", who: $p.user.login}
       end
     else {skip: "not actionable (reason: \($reason))"}

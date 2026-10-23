@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New config key `review_max_changed_lines` (additions + deletions as GitHub reports them; missing, null or 0 = no limit). A review request for a larger PR starts no job; you are told once per PR head ("skipped review, N changed lines is over your M-line limit"). A smaller PR or a new head is evaluated again. Fix, conflict and CI-fix jobs on your own PRs are unchanged. A string, negative or fractional value stops the poller with a loud report instead of silently disabling the limit.
+
 ## 0.6.0
 
 - `reviewing_mode` gains `walk` (`off | notify | walk | act`; default still `act`). On a review request nothing is posted on GitHub: the reviewer prepares a private draft (findings with file:line and the head sha), saved locally, and you are told "ready to walk: /pr-autopilot:walk N".
