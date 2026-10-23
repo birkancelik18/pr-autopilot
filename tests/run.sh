@@ -185,6 +185,21 @@ addc 8004; bump 12 2026-02-01T00:00:00Z; FAKE_NOTIF_EMPTY=1 poll
 check "a job for the PR is running: the new trigger waits, no parallel job" "$b 1" "$(fj12) $(plog 'a job for acme/app#12 is running')"
 rm -f "$S/running/$$"; bump 12 2026-02-01T00:00:00Z; FAKE_NOTIF_EMPTY=1 poll
 check "late trigger: handled by the next job once the first is done" "$((b + 1))" "$(fj12)"
+mkcfg true '{"fix_settle_seconds": 120, "fix_settle_max_seconds": 600}'; b=$(fj12); : >"$S/settle-first.tsv"
+addc 8005; bump 12 "$(nowz)"; FAKE_NOTIF_EMPTY=1 poll
+addc 8006; bump 12 "$(nowz)"; FAKE_NOTIF_EMPTY=1 poll
+check "cap: a PR with a comment every minute is still held back before the cap" "$b" "$(fj12)"
+printf 'dry|acme/app#12\t%s\n' "$(($(date +%s) - 700))" >"$S/settle-first.tsv" # first deferred 700s ago
+addc 8007; bump 12 "$(nowz)"; FAKE_NOTIF_EMPTY=1 poll
+check "cap: past fix_settle_max_seconds the job runs, with every pending trigger (newest comment id in the key)" "$((b + 1)) 1 1" \
+  "$(fj12) $(plog 'settle cap reached for dry|fix|acme/app|12') $(tail -1 "$S/jobs.log" | jq -r '.[5]' | grep -c 'c8007')"
+check "cap: the wait record is cleared once the job started" 0 "$(grep -c 'acme/app#12' "$S/settle-first.tsv")"
+for bad in '"600"' -1 1.5 true 100; do # 100 is below fix_settle_seconds (120)
+  mkcfg true "{\"fix_settle_seconds\": 120, \"fix_settle_max_seconds\": $bad}"; rm -f "$S/notified" "$S/last_config_error_report"; before=$(jobs_n)
+  PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
+  check "bad fix_settle_max_seconds $bad: poller exits non-zero, reports it, starts nothing" "1 1 $before" \
+    "$rc $(grep -c 'fix_settle_max_seconds .* must be a whole number' "$S/notified") $(jobs_n)"
+done
 for bad in '"120"' -5 1.5 true; do
   mkcfg true "{\"fix_settle_seconds\": $bad}"; rm -f "$S/notified" "$S/last_config_error_report"; before=$(jobs_n)
   PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?

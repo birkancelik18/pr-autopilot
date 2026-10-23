@@ -19,6 +19,7 @@
   "max_cost_usd_per_job": 10,
   "review_max_changed_lines": 0,
   "fix_settle_seconds": 120,
+  "fix_settle_max_seconds": 600,
   "review_skills": [],
   "notify_style": "window",
   "conflict_enabled": true,

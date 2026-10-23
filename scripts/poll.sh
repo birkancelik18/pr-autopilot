@@ -23,6 +23,11 @@ jq -e '.review_max_changed_lines | . == null or (type == "number" and . >= 0 and
 jq -e '.fix_settle_seconds | . == null or (type == "number" and . >= 0 and . == floor)' "$CONFIG" >/dev/null 2>&1 ||
   { report_throttled "pr-autopilot: fix_settle_seconds in $CONFIG must be a whole number, 0 or more (got $(jq -c .fix_settle_seconds "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
 
+# fix_settle_max_seconds: whole number (default 600), at least fix_settle_seconds: the longest a PR's fix job is held back.
+jq -e '(.fix_settle_max_seconds | . == null or (type == "number" and . >= 0 and . == floor))
+  and ((.fix_settle_max_seconds // 600) >= (.fix_settle_seconds // 120))' "$CONFIG" >/dev/null 2>&1 ||
+  { report_throttled "pr-autopilot: fix_settle_max_seconds in $CONFIG must be a whole number, 0 or more, and not below fix_settle_seconds (got $(jq -c .fix_settle_max_seconds "$CONFIG") with fix_settle_seconds $(jq -c '.fix_settle_seconds // 120' "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
+
 # Lock: mkdir is atomic; the pid file is written via temp+mv so a reader never sees it half written.
 LOCK=$STATE_DIR/poll.lock
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -58,7 +63,7 @@ me=$(gh api user --jq .login 2>>"$STATE_DIR/polls.log")
 [ -n "$me" ] || poll_fail "poll failed: gh api user returned nothing. Is gh logged in and online?"
 # Fail closed: live only when dry_run is exactly false; anything else (missing, null, "false") is dry.
 dry=$(jq -r 'if .dry_run == false then "false" else "true" end' "$CONFIG"); mode=live; [ "$dry" = true ] && mode=dry
-max=$(cfgd max_parallel 2) settle_s=$(cfgd fix_settle_seconds 120)
+max=$(cfgd max_parallel 2) settle_s=$(cfgd fix_settle_seconds 120) settle_max_s=$(cfgd fix_settle_max_seconds 600)
 
 # Going live must not replay the backlog: remember when dry_run was switched off and only act on
 # PRs (search results or notifications) updated after that. /pr-autopilot:replay resets live_since to the epoch.
@@ -177,6 +182,10 @@ if [ -n "$(find "$STATE_DIR/claude_limited" -mmin -30 2>/dev/null)" ]; then
   limited=1; log "claude session limit hit less than 30 minutes ago, not starting jobs"
 fi
 
+clear_settle() { # forget when this PR's settle wait began (uses process_item's seen_key)
+  [ -f "$STATE_DIR/settle-first.tsv" ] || return 0
+  awk -F'\t' -v k="$seen_key" '$1 != k' "$STATE_DIR/settle-first.tsv" >"$tmp/settle.new" && cat "$tmp/settle.new" >"$STATE_DIR/settle-first.tsv"
+}
 process_item() {
   local item=$1 repo n reason ev key file thread
   repo=$(jq -r .repo <<<"$item") n=$(jq -r .number <<<"$item") reason=$(jq -r .reason <<<"$item")
@@ -214,6 +223,7 @@ process_item() {
   [ "$(jq -r .untrusted <<<"$ev")" = 0 ] ||
     log "$repo#$n: ignoring $(jq -r .untrusted <<<"$ev") comment(s)/review(s) from untrusted authors (not owner/member/collaborator, not in trusted_commenters)"
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
+    clear_settle # nothing pending any more: the next trigger starts a new settle wait
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"
     # Too large to review: tell the owner once per head (size-skipped.tsv), like ci-gave-up.tsv.
     if [ "$(jq -r '.nosize // false' <<<"$ev")" = true ]; then
@@ -298,12 +308,19 @@ PR #$n ($(jq -r .title <<<"$ev")): new review feedback keeps coming after $np fe
   fi
   # Settle: a job that pushes starts only once the PR has been quiet for fix_settle_seconds (its updated_at
   # moves on every comment), so a burst of review and bot comments lands in one job and one push.
-  # ponytail: a PR that never goes quiet is deferred until it does; add a first-seen cap if that bites.
+  # The wait ends at most settle_max_s after the poller FIRST deferred this PR (settle-first.tsv), so a PR
+  # with a steady stream of comments still gets its job; it then takes every trigger pending at that moment.
   if [ "$(jq -r .kind <<<"$ev")" != review ]; then
-    local quiet
-    quiet=$(( $(date +%s) - $(jq -n -r --arg u "$updated" '$u | fromdateiso8601' 2>/dev/null || echo 0) ))
+    local quiet first now
+    now=$(date +%s)
+    quiet=$((now - $(jq -n -r --arg u "$updated" '$u | fromdateiso8601' 2>/dev/null || echo 0)))
     if [ "$settle_s" -gt 0 ] && [ "$quiet" -lt "$settle_s" ]; then
-      log "settling $key: PR active ${quiet}s ago, waiting for ${settle_s}s of quiet (fix_settle_seconds)"; return 0
+      first=$(awk -F'\t' -v k="$seen_key" '$1 == k {print $2}' "$STATE_DIR/settle-first.tsv" 2>/dev/null | head -1)
+      if [ -z "$first" ]; then first=$now; printf '%s\t%s\n' "$seen_key" "$now" >>"$STATE_DIR/settle-first.tsv"; fi
+      if [ $((now - first)) -lt "$settle_max_s" ]; then
+        log "settling $key: PR active ${quiet}s ago, waiting for ${settle_s}s of quiet (fix_settle_seconds, at most ${settle_max_s}s)"; return 0
+      fi
+      log "settle cap reached for $key after $((now - first))s (fix_settle_max_seconds), starting now"
     fi
   fi
   if [ -n "$limited" ]; then return 0; fi
@@ -316,6 +333,7 @@ PR #$n ($(jq -r .title <<<"$ev")): new review feedback keeps coming after $np fe
     '. + {dry_run: $dry, thread: $thread, reason: $reason, attempt: $attempt, walk: $walk}' <<<"$ev" >"$file"
   nohup "$JOB" "$file" >/dev/null 2>&1 </dev/null &
   echo "$key" >"$STATE_DIR/running/$!"
+  clear_settle
   log "started job for $key (pid $!)"
 }
 

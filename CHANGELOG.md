@@ -3,7 +3,8 @@
 ## 0.6.2
 
 - Fewer pushes per review round (each push costs a full CI run). Only one job per PR runs at a time; a trigger that arrives while one runs (new comment, conflict) waits and is handled by the next job, which starts from the pushed head. Before, a new comment key could start a second parallel fix job on the same PR.
-- New config key `fix_settle_seconds` (default 120, 0 = old behaviour): a fix, conflict or CI-fix job on your own PR starts only once the PR has been quiet (no `updated_at` change) for that long, so a burst of review and bot comments lands in one job and one push. Review jobs are not delayed. A string, negative or fractional value stops the poller with a loud report. Limit: a PR that never goes quiet keeps waiting; fix, conflict and CI-fix are still separate jobs in order.
+- New config key `fix_settle_seconds` (default 120, 0 = old behaviour): a fix, conflict or CI-fix job on your own PR starts only once the PR has been quiet (no `updated_at` change) for that long, so a burst of review and bot comments lands in one job and one push. Review jobs are not delayed. A string, negative or fractional value stops the poller with a loud report. Limit: fix, conflict and CI-fix are still separate jobs in order.
+- New config key `fix_settle_max_seconds` (default 600, whole number, must be >= `fix_settle_seconds`, else a loud report): the settle wait ends at most this long after the PR was first held back, so a PR that never goes quiet still gets its job, which takes every trigger pending at that moment.
 
 ## 0.6.1
 
