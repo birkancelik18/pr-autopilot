@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2
+
+- Fewer pushes per review round (each push costs a full CI run). Only one job per PR runs at a time; a trigger that arrives while one runs (new comment, conflict) waits and is handled by the next job, which starts from the pushed head. Before, a new comment key could start a second parallel fix job on the same PR.
+- New config key `fix_settle_seconds` (default 120, 0 = old behaviour): a fix, conflict or CI-fix job on your own PR starts only once the PR has been quiet (no `updated_at` change) for that long, so a burst of review and bot comments lands in one job and one push. Review jobs are not delayed. A string, negative or fractional value stops the poller with a loud report. Limit: a PR that never goes quiet keeps waiting; fix, conflict and CI-fix are still separate jobs in order.
+
 ## 0.6.1
 
 - New config key `review_max_changed_lines` (additions + deletions as GitHub reports them; missing, null or 0 = no limit). A review request for a larger PR starts no job; you are told once per PR head ("skipped review, N changed lines is over your M-line limit"). A smaller PR or a new head is evaluated again. Fix, conflict and CI-fix jobs on your own PRs are unchanged. A string, negative or fractional value stops the poller with a loud report instead of silently disabling the limit (that report has its own hourly throttle, so another error never swallows it). If a limit is set and GitHub gives no size for a PR, the review is skipped and you are told once per head.

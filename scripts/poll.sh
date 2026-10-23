@@ -19,6 +19,10 @@ jq -e '.repos | type == "object" and length > 0' "$CONFIG" >/dev/null 2>&1 ||
 jq -e '.review_max_changed_lines | . == null or (type == "number" and . >= 0 and . == floor)' "$CONFIG" >/dev/null 2>&1 ||
   { report_throttled "pr-autopilot: review_max_changed_lines in $CONFIG must be a whole number, 0 or more (got $(jq -c .review_max_changed_lines "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
 
+# fix_settle_seconds: a non-negative whole number (default 120, 0 = start fix jobs at once). Loud for the same reason.
+jq -e '.fix_settle_seconds | . == null or (type == "number" and . >= 0 and . == floor)' "$CONFIG" >/dev/null 2>&1 ||
+  { report_throttled "pr-autopilot: fix_settle_seconds in $CONFIG must be a whole number, 0 or more (got $(jq -c .fix_settle_seconds "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
+
 # Lock: mkdir is atomic; the pid file is written via temp+mv so a reader never sees it half written.
 LOCK=$STATE_DIR/poll.lock
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -54,7 +58,7 @@ me=$(gh api user --jq .login 2>>"$STATE_DIR/polls.log")
 [ -n "$me" ] || poll_fail "poll failed: gh api user returned nothing. Is gh logged in and online?"
 # Fail closed: live only when dry_run is exactly false; anything else (missing, null, "false") is dry.
 dry=$(jq -r 'if .dry_run == false then "false" else "true" end' "$CONFIG"); mode=live; [ "$dry" = true ] && mode=dry
-max=$(cfgd max_parallel 2)
+max=$(cfgd max_parallel 2) settle_s=$(cfgd fix_settle_seconds 120)
 
 # Going live must not replay the backlog: remember when dry_run was switched off and only act on
 # PRs (search results or notifications) updated after that. /pr-autopilot:replay resets live_since to the epoch.
@@ -282,12 +286,25 @@ PR #$n ($(jq -r .title <<<"$ev")): new review feedback keeps coming after $np fe
   fi
   if grep -qxF "$key" "$HANDLED"; then log "already handled $key"; settle; return 0; fi
   if key_running "$key"; then log "already running $key"; return 0; fi
+  # One job per PR at a time: a trigger that arrives while one runs (a new comment, a conflict) waits for
+  # the next poll, so it is never lost and its job sees the pushed head instead of racing it with a second push.
+  if key_running "$mode|*|$repo|$n|*"; then log "a job for $repo#$n is running, $key waits"; return 0; fi
   local nfail last
   nfail=$(awk -F'\t' -v k="$key" '$2 == k' "$FAILED" | wc -l | tr -d ' ')
   last=$(awk -F'\t' -v k="$key" '$2 == k {t = $1} END {print t + 0}' "$FAILED")
   if [ "$nfail" -ge "$MAX_ATTEMPTS" ]; then log "gave up on $key after $nfail failures"; settle; return 0; fi
   if [ "$nfail" -gt 0 ] && [ $(($(date +%s) - last)) -lt "$RETRY_AFTER" ]; then
     log "backing off $key ($nfail failures)"; return 0
+  fi
+  # Settle: a job that pushes starts only once the PR has been quiet for fix_settle_seconds (its updated_at
+  # moves on every comment), so a burst of review and bot comments lands in one job and one push.
+  # ponytail: a PR that never goes quiet is deferred until it does; add a first-seen cap if that bites.
+  if [ "$(jq -r .kind <<<"$ev")" != review ]; then
+    local quiet
+    quiet=$(( $(date +%s) - $(jq -n -r --arg u "$updated" '$u | fromdateiso8601' 2>/dev/null || echo 0) ))
+    if [ "$settle_s" -gt 0 ] && [ "$quiet" -lt "$settle_s" ]; then
+      log "settling $key: PR active ${quiet}s ago, waiting for ${settle_s}s of quiet (fix_settle_seconds)"; return 0
+    fi
   fi
   if [ -n "$limited" ]; then return 0; fi
   if [ "$(running)" -ge "$max" ]; then log "at max_parallel=$max, deferring $repo#$n"; return 0; fi

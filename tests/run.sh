@@ -164,6 +164,35 @@ for bad in '"1000"' -5 1.5 true; do
 done
 mkcfg true
 
+echo "== poller: fix_settle_seconds and one job per PR"
+addc() { jq --argjson id "$1" '. + [{"id":$id,"user":{"login":"bob"},"author_association":"MEMBER","body":"more"}]' "$FIX/comments-12.json" >"$W/x" && mv "$W/x" "$FIX/comments-12.json"; }
+nowz() { date -u +%FT%TZ; }
+fj12() { grep -c '"fix","acme/app",12' "$S/jobs.log"; }
+mkcfg true '{"fix_settle_seconds": 120}'; b=$(fj12)
+addc 8001; bump 12 "$(nowz)"; FAKE_NOTIF_EMPTY=1 poll
+check "settle: a comment just landed, no fix job yet" "$b 1" "$(fj12) $(plog 'settling dry|fix|acme/app|12')"
+addc 8002; bump 12 "$(nowz)"; FAKE_NOTIF_EMPTY=1 poll
+check "settle: a second comment in the burst still waits" "$b" "$(fj12)"
+bump 12 2026-02-01T00:00:00Z; FAKE_NOTIF_EMPTY=1 poll
+check "quiet long enough: ONE job for both triggers (key holds the newest comment id)" "$((b + 1)) 1" \
+  "$(fj12) $(tail -1 "$S/jobs.log" | jq -r '.[5]' | grep -c 'c8002')"
+mkcfg true '{"fix_settle_seconds": 0}'; b=$(fj12)
+addc 8003; bump 12 "$(nowz)"; FAKE_NOTIF_EMPTY=1 poll
+check "fix_settle_seconds 0: old behaviour, starts at once" "$((b + 1))" "$(fj12)"
+mkcfg true '{"fix_settle_seconds": 120}'; b=$(fj12)
+echo "dry|fix|acme/app|12|earlier" >"$S/running/$$"
+addc 8004; bump 12 2026-02-01T00:00:00Z; FAKE_NOTIF_EMPTY=1 poll
+check "a job for the PR is running: the new trigger waits, no parallel job" "$b 1" "$(fj12) $(plog 'a job for acme/app#12 is running')"
+rm -f "$S/running/$$"; bump 12 2026-02-01T00:00:00Z; FAKE_NOTIF_EMPTY=1 poll
+check "late trigger: handled by the next job once the first is done" "$((b + 1))" "$(fj12)"
+for bad in '"120"' -5 1.5 true; do
+  mkcfg true "{\"fix_settle_seconds\": $bad}"; rm -f "$S/notified" "$S/last_config_error_report"; before=$(jobs_n)
+  PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
+  check "bad fix_settle_seconds $bad: poller exits non-zero, reports it, starts nothing" "1 1 $before" \
+    "$rc $(grep -c 'fix_settle_seconds .* must be a whole number' "$S/notified") $(jobs_n)"
+done
+mkcfg true
+
 echo "== poller: network blips are quiet, failed.tsv only lists active failures"
 mkcfg true; rm -f "$S/notified" "$S/last_error_report" "$S/poll_failures"
 for i in 1 2 3 4; do FAKE_GH_FAIL="GET user" poll >/dev/null 2>&1; done
@@ -880,7 +909,7 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.6.1 and the installer reports it" "0.6.1 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.6.1')"
+check "plugin version is 0.6.2 and the installer reports it" "0.6.2 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.6.2')"
 if ! command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
   (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1

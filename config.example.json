@@ -18,6 +18,7 @@
   "auto_approve_outsiders": false,
   "max_cost_usd_per_job": 10,
   "review_max_changed_lines": 0,
+  "fix_settle_seconds": 120,
   "review_skills": [],
   "notify_style": "window",
   "conflict_enabled": true,
