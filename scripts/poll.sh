@@ -17,7 +17,7 @@ jq -e '.repos | type == "object" and length > 0' "$CONFIG" >/dev/null 2>&1 ||
 # review_max_changed_lines: a non-negative integer (0 or missing = no limit). Anything else fails loudly:
 # silently ignoring a typo would review the PRs the owner wanted skipped.
 jq -e '.review_max_changed_lines | . == null or (type == "number" and . >= 0 and . == floor)' "$CONFIG" >/dev/null 2>&1 ||
-  { report_throttled "pr-autopilot: review_max_changed_lines in $CONFIG must be a whole number, 0 or more (got $(jq -c .review_max_changed_lines "$CONFIG")), doing nothing"; exit 1; }
+  { report_throttled "pr-autopilot: review_max_changed_lines in $CONFIG must be a whole number, 0 or more (got $(jq -c .review_max_changed_lines "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
 
 # Lock: mkdir is atomic; the pid file is written via temp+mv so a reader never sees it half written.
 LOCK=$STATE_DIR/poll.lock
@@ -212,7 +212,14 @@ process_item() {
   if [ -n "$(jq -r '.skip // ""' <<<"$ev")" ]; then
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"
     # Too large to review: tell the owner once per head (size-skipped.tsv), like ci-gave-up.tsv.
-    if [ "$(jq -r '.lines // ""' <<<"$ev")" != "" ]; then
+    if [ "$(jq -r '.nosize // false' <<<"$ev")" = true ]; then
+      local sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
+      if ! grep -qxF "$sk" "$STATE_DIR/size-skipped.tsv" 2>/dev/null; then
+        echo "$sk" >>"$STATE_DIR/size-skipped.tsv"
+        report "$(jq -r .url <<<"$ev")
+PR #$n ($(jq -r .title <<<"$ev")): skipped review, GitHub gave no size (review_max_changed_lines is set)."
+      fi
+    elif [ "$(jq -r '.lines // ""' <<<"$ev")" != "" ]; then
       local sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
       if ! grep -qxF "$sk" "$STATE_DIR/size-skipped.tsv" 2>/dev/null; then
         echo "$sk" >>"$STATE_DIR/size-skipped.tsv"

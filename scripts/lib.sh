@@ -168,9 +168,10 @@ report() {
   fi
 }
 
-# report_throttled <message>: for poller-level failures that repeat every minute (max 1 per hour).
+# report_throttled <message> [stamp file name]: for poller-level failures that repeat every minute (max 1 per
+# hour per stamp; the default stamp is shared by all errors, a config error passes its own so it is never swallowed).
 report_throttled() {
-  local f=$STATE_DIR/last_error_report
+  local f=$STATE_DIR/${2:-last_error_report}
   if [ ! -f "$f" ] || [ -n "$(find "$f" -mmin +60 2>/dev/null)" ]; then
     touch "$f"
     report "$1"

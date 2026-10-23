@@ -79,8 +79,11 @@ def maxid: if length == 0 then null else max_by(.id) end;
           and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | length) > 0 then
         {skip: "already reviewed this head"}
       # Over review_max_changed_lines (additions + deletions, 0 or missing = no limit): poll.sh tells the owner once per head.
-      elif (($ARGS.named.review_max // 0) > 0) and (($p.additions // 0) + ($p.deletions // 0)) > $ARGS.named.review_max then
-        {skip: "review too large", lines: (($p.additions // 0) + ($p.deletions // 0))}
+      # A limit is set but GitHub gave no size: fail closed (no review), poll.sh says so once per head.
+      elif (($ARGS.named.review_max // 0) > 0) and ($p.additions == null or $p.deletions == null) then
+        {skip: "review size unknown", nosize: true}
+      elif (($ARGS.named.review_max // 0) > 0) and ($p.additions + $p.deletions) > $ARGS.named.review_max then
+        {skip: "review too large", lines: ($p.additions + $p.deletions)}
       else {kind: "review", key: "review|\($repo)|\($p.number)|\($p.head.sha)", who: $p.user.login}
       end
     else {skip: "not actionable (reason: \($reason))"}

@@ -150,8 +150,14 @@ done
 check "limit null or 0: no limit, the big PR is reviewed" "1" "$(szjobs szz4)"
 mkcfg true; jq '.head.sha = "szz5"' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"; bump 11; FAKE_NOTIF_EMPTY=1 poll
 check "limit unset: no limit" "1" "$(szjobs szz5)"
+mkcfg true '{"review_max_changed_lines": 1000}'; rm -f "$S/notified"
+jq '.head.sha = "szz6" | del(.additions)' "$FIX/pr-11.json" >"$W/x" && mv "$W/x" "$FIX/pr-11.json"; bump 11
+FAKE_NOTIF_EMPTY=1 poll; bump 11; FAKE_NOTIF_EMPTY=1 poll
+check "limit set but GitHub gave no size: no review, told once per head" "0 1" \
+  "$(szjobs szz6) $(grep -c 'PR #11 .*skipped review, GitHub gave no size' "$S/notified")"
 for bad in '"1000"' -5 1.5 true; do
-  mkcfg true "{\"review_max_changed_lines\": $bad}"; rm -f "$S/notified" "$S/last_error_report"; before=$(jobs_n)
+  # last_error_report is fresh (another error was just reported): a config error must still notify
+  mkcfg true "{\"review_max_changed_lines\": $bad}"; rm -f "$S/notified" "$S/last_config_error_report"; touch "$S/last_error_report"; before=$(jobs_n)
   PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
   check "bad review_max_changed_lines $bad: poller exits non-zero, reports it, starts nothing" "1 1 $before" \
     "$rc $(grep -c 'review_max_changed_lines .* must be a whole number' "$S/notified") $(jobs_n)"
