@@ -231,6 +231,9 @@ if [ "$kind" = review ]; then
   diff_note=""
   last=$(jq -r --arg me "$me" '[.[] | select(.user.login == $me and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | last | .commit_id // empty' "$JOB/reviews.json")
   if [ -n "$last" ] && [ "$last" != "$head" ] && git -C "$clone" merge-base --is-ancestor "$last" "$head" 2>/dev/null &&
+    # The base was merged into the PR since then (Update branch): last..head would hold the base's own changes
+    # as if they were the PR's. The merge-base with the base only stays put when it was not, else: whole PR diff.
+    [ "$(git -C "$clone" merge-base "$BASEREF" "$last" 2>/dev/null)" = "$(git -C "$clone" merge-base "$BASEREF" "$head" 2>/dev/null)" ] &&
     git -C "$clone" diff "$last" "$head" >"$JOB/diff.incr.patch" 2>>"$LOG" && [ -s "$JOB/diff.incr.patch" ]; then
     mv "$JOB/diff.incr.patch" "$JOB/diff.patch"
     diff_note="# INCREMENTAL REVIEW: diff.patch holds only the changes since ${last:0:7}, the commit you last reviewed. Review these changes in their context in the checkout, and re-check your earlier points against the current code. Do not re-review the rest of the PR."

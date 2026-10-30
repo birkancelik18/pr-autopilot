@@ -511,6 +511,7 @@ rm -f "$S/claude_limited" "$S/transient.tsv"
 
 echo "-- review cost: incremental diff, trimmed noise, enforced cap"
 NEW=$(git -C "$O" -c user.name=t -c user.email=t@t commit -q --allow-empty -m none && echo x >"$O/src/b.txt" && git -C "$O" add -A && git -C "$O" -c user.name=t -c user.email=t@t commit -q -m second && git -C "$O" rev-parse HEAD)
+git -C "$O" update-ref refs/heads/main "$SHA" # the PR's commits are not on the base branch
 git -C "$O" update-ref refs/pull/11/head "$NEW"
 cp "$FIX/pr-11.json" "$W/pr-11.keep"; cp "$FIX/reviews-11.json" "$W/reviews-11.keep"; cp "$FIX/diff.patch" "$W/diff.keep"
 jq --arg s "$NEW" '.head.sha = $s' "$W/pr-11.keep" >"$FIX/pr-11.json"
@@ -519,6 +520,21 @@ reset; ev review false "$NEW"; FAKE_CLAUDE=review job
 jd=$(cat "$S/claude.jobdir")
 check "second round: diff.patch is only the commits since the last reviewed sha, with a note" "1 1 0" \
   "$(head -1 "$jd/diff.patch" | grep -c '^# INCREMENTAL REVIEW: .*since '"${SHA:0:7}") $(grep -c '^diff --git a/src/b.txt' "$jd/diff.patch") $(grep -c 'src/a.txt' "$jd/diff.patch")"
+# Update branch: main moved on and was merged into the PR since the last review. last..head then holds main's changes.
+MAIN0=$(git -C "$O" rev-parse refs/heads/main)
+export GIT_INDEX_FILE=$W/idx.tmp GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+rm -f "$GIT_INDEX_FILE"; git -C "$O" read-tree "$MAIN0"; git -C "$O" update-index --add --cacheinfo "100644,$(echo m | git -C "$O" hash-object -w --stdin),m.txt"
+MAIN1=$(git -C "$O" commit-tree "$(git -C "$O" write-tree)" -p "$MAIN0" -m "main moved")
+rm -f "$GIT_INDEX_FILE"; git -C "$O" read-tree "$NEW"; git -C "$O" update-index --add --cacheinfo "100644,$(echo m | git -C "$O" hash-object -w --stdin),m.txt"
+MERGED=$(git -C "$O" commit-tree "$(git -C "$O" write-tree)" -p "$NEW" -p "$MAIN1" -m "Merge main into feature-11")
+unset GIT_INDEX_FILE GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+git -C "$O" update-ref refs/heads/main "$MAIN1"; git -C "$O" update-ref refs/pull/11/head "$MERGED"
+jq --arg s "$MERGED" '.head.sha = $s' "$W/pr-11.keep" >"$FIX/pr-11.json"
+reset; ev review false "$MERGED"; FAKE_CLAUDE=review job; jd=$(cat "$S/claude.jobdir")
+check "base merged into the PR since the last review (Update branch): whole PR diff, not last..head" "0 1" \
+  "$(grep -c INCREMENTAL "$jd/diff.patch") $(grep -c '^diff --git a/src/a.txt' "$jd/diff.patch")"
+git -C "$O" update-ref refs/heads/main "$MAIN0"; git -C "$O" update-ref refs/pull/11/head "$NEW"
+jq --arg s "$NEW" '.head.sha = $s' "$W/pr-11.keep" >"$FIX/pr-11.json"
 reset; jq --arg s "$SHA" '.[-1].commit_id = "0000000000000000000000000000000000000000"' "$FIX/reviews-11.json" >"$W/x" && mv "$W/x" "$FIX/reviews-11.json"
 ev review false "$NEW"; FAKE_CLAUDE=review job; jd=$(cat "$S/claude.jobdir")
 check "last reviewed sha unknown to git (force push): falls back to the whole diff" "0 1" \
