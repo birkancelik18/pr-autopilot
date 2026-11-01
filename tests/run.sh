@@ -290,8 +290,10 @@ ra() { # ra <extra config>: a clean poll; prints "jobs for #21, jobs for #22, re
 }
 check "unset: no extra search, a teammate's PR without a review request is not reviewed" "0 0 0" "$(ra '{}')"
 check "review_authors []: same" "0 0 0" "$(ra '{"review_authors": []}')"
-check "listed (case-insensitive): #21 reviewed at its head, ONE search for all authors per poll" "1 0 1" "$(ra '{"review_authors": ["Alice", "bob"]}')"
-check "that search names every author, non-draft only" 1 "$(grep -c 'draft%3Afalse%20author%3AAlice%20author%3Abob' "$S/fake/review-author-searches")"
+check "listed (case-insensitive): #21 reviewed at its head, one search per login per poll" "1 0 2" "$(ra '{"review_authors": ["Alice", "bob"]}')"
+check "each search names one author, non-draft only, scoped to the repos" "1 1" \
+  "$(grep -c 'draft%3Afalse%20author%3AAlice%20repo%3AAcme%2FApp$' "$S/fake/review-author-searches") $(grep -c 'draft%3Afalse%20author%3Abob%20repo%3AAcme%2FApp$' "$S/fake/review-author-searches")"
+check "a search hit outside the configured repos is dropped before any fetch" "0 0" "$(plog 'other/x') $(plog '#23')"
 check "same job as a review request: key, live flag" 1 "$(grep -cxF '["review","acme/app",21,"kkk000",true,"review|acme/app|21|kkk000"]' "$S/jobs.log")"
 check "events say why: by_author on #21 and on #17 (alice's, only a mention), not on the requested #11 #19 #20" "17 21" \
   "$(jq -s -r '[.[] | select(.by_author) | .number] | sort | join(" ")' "$S"/events/*.json)"
@@ -309,6 +311,18 @@ for bad in '"alice"' '["alice is:closed"]' '[7]'; do
   check "bad review_authors $bad: poller exits non-zero, reports it, starts nothing" "1 1 0" \
     "$rc $(grep -c 'review_authors .* must be a list of GitHub logins' "$S/notified") $(jobs_n)"
 done
+# 10 logins of GitHub's maximum length (39) and 30 long repo names: every query keeps its repo scope and fits.
+logins10=$(jq -nc '[range(10) | "u\(.)-" + ("x" * 36)]')
+repos30=$(jq -nc '[range(30) | {key: "some-org/a-fairly-long-repository-name-\(.)", value: "/tmp/x"}] | from_entries + {"Acme/App": "/tmp/no-such-clone"}')
+rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": $logins10, \"repos\": $repos30}"; poll
+qs=$(sed 's/.*&q=//' "$S/fake/review-author-searches" | while IFS= read -r q; do printf '%b\n' "${q//%/\\x}"; done)
+check "10 logins: every query has repo: scope and is at most 256 chars, all 31 repos covered per login" "0 0 310" \
+  "$(grep -vc ' repo:' <<<"$qs") $(awk 'length > 256' <<<"$qs" | wc -l | tr -d ' ') $(grep -o 'repo:[^ ]*' <<<"$qs" | wc -l | tr -d ' ')"
+check "and one login per query" 0 "$(grep -c 'author:.*author:' <<<"$qs")"
+rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": $(jq -nc '[range(11) | "u\(.)"]')}"
+PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
+check "11 logins: poller exits non-zero, reports it, searches nothing, starts nothing" "1 1 0 0" \
+  "$rc $(grep -c 'review_authors .* lists 11 logins, at most 10' "$S/notified") $(cat "$S/fake/review-author-searches" 2>/dev/null | wc -l | tr -d ' ') $(jobs_n)"
 FIX=$oldFIX S=$oldS; export FIX PR_AUTOPILOT_STATE=$oldST; mkcfg true
 
 echo "== poller: removed local-CI keys in an old config are ignored with one warning, never a crash"

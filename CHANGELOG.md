@@ -2,7 +2,7 @@
 
 ## 0.8.0
 
-- New config key `review_authors` (default `[]`: no change): GitHub logins whose open, non-draft PRs in your configured repos are reviewed even when nobody requested your review, e.g. `["alice", "bob"]`. They go through the same path as a review request: same `reviewing_mode`, `review_enabled`, `allow_forks`, `review_max_changed_lines`, live-since and retry rules, and each head is reviewed once (a PR you already reviewed at its current head is skipped). It costs one extra search per poll for all listed logins together. Whether a PR counts is decided on its author as GitHub reports it when the PR is fetched, not on the search hit. Anything but a list of GitHub logins stops the poller with a loud report.
+- New config key `review_authors` (default `[]`: no change): GitHub logins whose open, non-draft PRs in your configured repos are reviewed even when nobody requested your review, e.g. `["alice", "bob"]`. They go through the same path as a review request: same `reviewing_mode`, `review_enabled`, `allow_forks`, `review_max_changed_lines`, live-since and retry rules, and each head is reviewed once (a PR you already reviewed at its current head is skipped). It costs one extra search per listed login per poll (at most 10 logins, more stops the poller loudly), each scoped to your configured repos; search hits outside them are dropped. Whether a PR counts is decided on its author as GitHub reports it when the PR is fetched, not on the search hit. Anything but a list of GitHub logins stops the poller with a loud report.
 
 ## 0.7.0
 

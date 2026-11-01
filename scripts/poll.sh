@@ -24,9 +24,12 @@ jq -e '.fix_settle_seconds | . == null or (type == "number" and . >= 0 and . == 
   { report_throttled "pr-autopilot: fix_settle_seconds in $CONFIG must be a whole number, 0 or more (got $(jq -c .fix_settle_seconds "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
 
 # review_authors: GitHub logins whose open PRs are reviewed like a review request. Loud on anything else: each
-# login goes into the search query, so it must be a login and nothing more.
-jq -e '.review_authors | . == null or (type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9](-?[A-Za-z0-9])*$")))' "$CONFIG" >/dev/null 2>&1 ||
+# login goes into the search query, so it must be a login and nothing more. At most 10: each costs one search per
+# poll (search allows 30 calls a minute).
+jq -e '.review_authors | . == null or (type == "array" and all(.[]; type == "string" and length <= 39 and test("^[A-Za-z0-9](-?[A-Za-z0-9])*$")))' "$CONFIG" >/dev/null 2>&1 ||
   { report_throttled "pr-autopilot: review_authors in $CONFIG must be a list of GitHub logins (got $(jq -c .review_authors "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
+jq -e '(.review_authors // []) | length <= 10' "$CONFIG" >/dev/null 2>&1 ||
+  { report_throttled "pr-autopilot: review_authors in $CONFIG lists $(jq '.review_authors | length' "$CONFIG") logins, at most 10 (one search each per poll), doing nothing" last_config_error_report; exit 1; }
 
 # fix_settle_max_seconds: whole number (default 600), at least fix_settle_seconds: the longest a PR's fix job is held back.
 jq -e '(.fix_settle_max_seconds | . == null or (type == "number" and . >= 0 and . == floor))
@@ -121,17 +124,24 @@ search() { # search <qualifier> <reason>: all pages, over each repo chunk (query
     q="is:pr is:open archived:false $1 $chunk"
     for page in 1 2 3 4 5; do
       out=$(gh api "search/issues?per_page=100&page=$page&q=$(jq -rn --arg q "$q" '$q | @uri')" 2>>"$STATE_DIR/polls.log") || return 1
-      jq -c --arg reason "$2" '.items[] | {thread: "", reason: $reason, src: "search",
-        repo: (.repository_url | sub(".*/repos/"; "")), number, updated_at}' <<<"$out" || return 1
+      # Only configured repos, whatever the query matched (as for notifications).
+      jq -c --arg reason "$2" --slurpfile c "$CONFIG" '($c[0].repos | with_entries(.key |= ascii_downcase)) as $r
+        | .items[] | {thread: "", reason: $reason, src: "search",
+        repo: (.repository_url | sub(".*/repos/"; "")), number, updated_at}
+        | select($r[.repo | ascii_downcase] != null)' <<<"$out" || return 1
       [ "$(jq '.items | length' <<<"$out")" -ge 100 ] || break
     done
   done < <(repo_chunks $((250 - ${#1} - 30)))
 }
-# review_authors: one more search for all of them at once (several author: qualifiers match any of them).
-authors=$(jq -r '[(.review_authors // [])[] | "author:" + .] | join(" ")' "$CONFIG")
+# review_authors: one search per login (at most 10), each over the repo chunks like the searches above.
+review_author_searches() {
+  local login
+  while IFS= read -r login; do
+    [ -z "$login" ] || search "draft:false author:$login" review_author || return 1
+  done < <(jq -r '(.review_authors // [])[]' "$CONFIG")
+}
 {
-  search "review-requested:$me" review_requested && search "author:$me" author &&
-    { [ -z "$authors" ] || search "draft:false $authors" review_author; }
+  search "review-requested:$me" review_requested && search "author:$me" author && review_author_searches
 } >"$tmp/search" || poll_fail "poll failed: GitHub search failed (see $STATE_DIR/polls.log)"
 echo 0 >"$STATE_DIR/poll_failures"
 if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE_DIR/polls.log" |
