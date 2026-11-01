@@ -281,6 +281,36 @@ check "ctl mode rejects a bad value and leaves the config alone" "2 notify" "$(b
 check "status shows both" 1 "$(bash "$T/../scripts/ctl.sh" status | grep -c 'reviewing others: walk   my PRs: notify')"
 FIX=$oldFIX S=$oldS; export FIX PR_AUTOPILOT_STATE=$oldST
 
+echo "== poller: review_authors (fresh fixtures and state)"
+export FIX=$W/fix-ra PR_AUTOPILOT_STATE=$W/state-ra; S=$PR_AUTOPILOT_STATE
+cp -R "$T/fixtures" "$FIX"
+ra() { # ra <extra config>: a clean poll; prints "jobs for #21, jobs for #22, review-author searches"
+  rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "$1"; poll
+  echo "$(grep -c '"review","acme/app",21,' "$S/jobs.log") $(grep -c ',"acme/app",22,' "$S/jobs.log") $(cat "$S/fake/review-author-searches" 2>/dev/null | wc -l | tr -d ' ')"
+}
+check "unset: no extra search, a teammate's PR without a review request is not reviewed" "0 0 0" "$(ra '{}')"
+check "review_authors []: same" "0 0 0" "$(ra '{"review_authors": []}')"
+check "listed (case-insensitive): #21 reviewed at its head, ONE search for all authors per poll" "1 0 1" "$(ra '{"review_authors": ["Alice", "bob"]}')"
+check "that search names every author, non-draft only" 1 "$(grep -c 'draft%3Afalse%20author%3AAlice%20author%3Abob' "$S/fake/review-author-searches")"
+check "same job as a review request: key, live flag" 1 "$(grep -cxF '["review","acme/app",21,"kkk000",true,"review|acme/app|21|kkk000"]' "$S/jobs.log")"
+check "events say why: by_author on #21 and on #17 (alice's, only a mention), not on the requested #11 #19 #20" "17 21" \
+  "$(jq -s -r '[.[] | select(.by_author) | .number] | sort | join(" ")' "$S"/events/*.json)"
+check "a search hit whose author GitHub reports as not listed is not reviewed" 1 "$(plog 'skip acme/app#22: not actionable (reason: review_author)')"
+poll; check "second poll: the head is not reviewed twice" 1 "$(grep -c '"review","acme/app",21,' "$S/jobs.log")"
+echo '[{"id":56,"state":"COMMENTED","user":{"login":"me"},"commit_id":"kkk000"}]' >"$FIX/reviews-21.json"
+check "already reviewed by me at this head: skipped" "0 0 1" "$(ra '{"review_authors": ["alice"]}')"
+rm -f "$FIX/reviews-21.json"
+check "review_max_changed_lines applies (42 lines over a 10-line limit)" "0 0 1" "$(ra '{"review_authors": ["alice"], "review_max_changed_lines": 10}')"
+check "reviewing_mode notify: told once, nothing runs" "0 1" "$(ra '{"review_authors": ["alice"], "reviewing_mode": "notify"}' | cut -d' ' -f1) $(grep -c 'PR #21 .*alice wrote it (review_authors)' "$S/inbox.jsonl")"
+check "live: a PR not updated since going live is not reviewed" "0 0 1" "$(ra '{"review_authors": ["alice"], "dry_run": false}')"
+for bad in '"alice"' '["alice is:closed"]' '[7]'; do
+  rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": $bad}"
+  PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
+  check "bad review_authors $bad: poller exits non-zero, reports it, starts nothing" "1 1 0" \
+    "$rc $(grep -c 'review_authors .* must be a list of GitHub logins' "$S/notified") $(jobs_n)"
+done
+FIX=$oldFIX S=$oldS; export FIX PR_AUTOPILOT_STATE=$oldST; mkcfg true
+
 echo "== poller: removed local-CI keys in an old config are ignored with one warning, never a crash"
 : >"$S/handled.tsv"; : >"$S/seen.tsv"; : >"$S/failed.tsv"; rm -f "$S/notified"
 newjobs() { tail -n +$((n0 + 1)) "$S/jobs.log"; }
@@ -987,7 +1017,7 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.7.0 and the installer reports it" "0.7.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.7.0')"
+check "plugin version is 0.8.0 and the installer reports it" "0.8.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.8.0')"
 if ! command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
   (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1

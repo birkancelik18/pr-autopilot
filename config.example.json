@@ -9,6 +9,7 @@
   "mine_mode": "act",
   "allow_forks": false,
   "ignore_authors": [],
+  "review_authors": [],
   "max_parallel": 2,
   "job_timeout_minutes": 30,
   "stall_minutes": 8,

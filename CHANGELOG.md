@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0
+
+- New config key `review_authors` (default `[]`: no change): GitHub logins whose open, non-draft PRs in your configured repos are reviewed even when nobody requested your review, e.g. `["alice", "bob"]`. They go through the same path as a review request: same `reviewing_mode`, `review_enabled`, `allow_forks`, `review_max_changed_lines`, live-since and retry rules, and each head is reviewed once (a PR you already reviewed at its current head is skipped). It costs one extra search per poll for all listed logins together. Whether a PR counts is decided on its author as GitHub reports it when the PR is fetched, not on the search hit. Anything but a list of GitHub logins stops the poller with a loud report.
+
 ## 0.7.0
 
 - Fix: wasted attempts. Claude's org monthly spend limit ("You've hit your org's monthly spend limit ... your session limit resets 3:20pm (Europe/Istanbul)"), usage limits and session limits all failed a job as "claude exited with status 1", three times in a row, and the job gave up (only the exact phrase "hit your session limit" was recognised). Any of these is now treated as a limit: the run does not count as an attempt, no job starts until the reset time named in the message (30 minutes when none is given), and you get one notification, not one per job.

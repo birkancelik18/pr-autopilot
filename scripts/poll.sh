@@ -23,6 +23,11 @@ jq -e '.review_max_changed_lines | . == null or (type == "number" and . >= 0 and
 jq -e '.fix_settle_seconds | . == null or (type == "number" and . >= 0 and . == floor)' "$CONFIG" >/dev/null 2>&1 ||
   { report_throttled "pr-autopilot: fix_settle_seconds in $CONFIG must be a whole number, 0 or more (got $(jq -c .fix_settle_seconds "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
 
+# review_authors: GitHub logins whose open PRs are reviewed like a review request. Loud on anything else: each
+# login goes into the search query, so it must be a login and nothing more.
+jq -e '.review_authors | . == null or (type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9](-?[A-Za-z0-9])*$")))' "$CONFIG" >/dev/null 2>&1 ||
+  { report_throttled "pr-autopilot: review_authors in $CONFIG must be a list of GitHub logins (got $(jq -c .review_authors "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
+
 # fix_settle_max_seconds: whole number (default 600), at least fix_settle_seconds: the longest a PR's fix job is held back.
 jq -e '(.fix_settle_max_seconds | . == null or (type == "number" and . >= 0 and . == floor))
   and ((.fix_settle_max_seconds // 600) >= (.fix_settle_seconds // 120))' "$CONFIG" >/dev/null 2>&1 ||
@@ -98,7 +103,8 @@ flags=(--argjson allow_forks "$(cfgd allow_forks false)"
   --argjson ignore "$(jq -c '.ignore_authors // []' "$CONFIG")"
   --argjson trusted "$(jq -c '.trusted_commenters // []' "$CONFIG")"
   --argjson review_bots "$(review_bots)"
-  --argjson review_max "$(cfgd review_max_changed_lines 0)")
+  --argjson review_max "$(cfgd review_max_changed_lines 0)"
+  --argjson review_authors "$(jq -c '.review_authors // []' "$CONFIG")")
 # Feedback-fix cap (config max_feedback_fixes {per_head, per_pr}): a review bot and the fixer answering
 # each other must not loop. job.sh records each finished fix in fixes.tsv: "mode|repo|n<TAB>head".
 MAX_FIX_HEAD=$(jq -r '(.max_feedback_fixes | objects | .per_head) // 3' "$CONFIG")
@@ -121,8 +127,11 @@ search() { # search <qualifier> <reason>: all pages, over each repo chunk (query
     done
   done < <(repo_chunks $((250 - ${#1} - 30)))
 }
+# review_authors: one more search for all of them at once (several author: qualifiers match any of them).
+authors=$(jq -r '[(.review_authors // [])[] | "author:" + .] | join(" ")' "$CONFIG")
 {
-  search "review-requested:$me" review_requested && search "author:$me" author
+  search "review-requested:$me" review_requested && search "author:$me" author &&
+    { [ -z "$authors" ] || search "draft:false $authors" review_author; }
 } >"$tmp/search" || poll_fail "poll failed: GitHub search failed (see $STATE_DIR/polls.log)"
 echo 0 >"$STATE_DIR/poll_failures"
 if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE_DIR/polls.log" |
@@ -133,10 +142,11 @@ if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE
        number: (.subject.url | split("/") | last | tonumber)}' >"$tmp/notif"; then
   log "WARN could not list notifications, continuing with search only"; : >"$tmp/notif"
 fi
-# One item per PR: keep a notification thread id if any, review_requested wins, newest updated_at.
+# One item per PR: keep a notification thread id if any, review_requested wins, then author, then
+# review_author (so a mention on a listed teammate's PR is still a review); newest updated_at.
 cat "$tmp/search" "$tmp/notif" | jq -s -c 'group_by([(.repo | ascii_downcase), .number])[]
   | {thread: (map(.thread) | map(select(. != "")) | first // ""),
-     reason: (if any(.reason == "review_requested") then "review_requested" else .[0].reason end),
+     reason: (. as $g | first(("review_requested", "author", "review_author") | select(IN($g[].reason))) // .[0].reason),
      via_search: any(.src == "search" and .reason == "review_requested"),
      repo: .[0].repo, number: .[0].number, updated_at: (map(.updated_at) | max)}' >"$tmp/items"
 
@@ -251,7 +261,7 @@ PR #$n ($(jq -r .title <<<"$ev")): skipped review, $(jq -r .lines <<<"$ev") chan
 PR #$n ($(jq -r .title <<<"$1")): $2 (notify only: nothing was posted, fixed or pushed)"
   }
   if [ "$rmode" = notify ] && [ "$(jq -r .kind <<<"$ev")" = review ] && ! grep -qxF "$key" "$HANDLED"; then
-    notify_only "$ev" "$(jq -r .who <<<"$ev") asked for your review"; settle; return 0
+    notify_only "$ev" "$(jq -r 'if .by_author then "\(.who) wrote it (review_authors)" else "\(.who) asked for your review" end' <<<"$ev")"; settle; return 0
   fi
   # Own PRs carry ordered steps (feedback, then conflict, then CI): run the first not handled yet.
   local st next=""

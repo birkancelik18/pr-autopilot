@@ -4,6 +4,7 @@
 #       --argjson review_bots (bot logins whose review threads count, e.g. ["coderabbitai[bot]"])
 #       --argjson via_search (true when the review request came from the search source)
 #       --argjson review_max (optional: review_max_changed_lines, 0 = no limit)
+#       --argjson review_authors (optional: logins whose open PRs are reviewed without a review request)
 #       --argjson allow_forks/review_enabled/fix_enabled/conflict_enabled/ci_enabled
 #       --slurpfile threads (review_threads in lib.sh: [{id, resolved, comments: [{id, login, assoc}]}],
 #       [] when not fetched)
@@ -21,6 +22,10 @@ def maxid: if length == 0 then null else max_by(.id) end;
 ($pr[0]) as $p | ($reviews[0]) as $rv | ($comments[0]) as $cm | ($issue[0]) as $ic | $checks as $ck
 | (($p.head.repo.full_name // "") != $p.base.repo.full_name) as $fork
 | ([($rv + $cm + $ic)[] | human | select(trusted | not)] | length) as $untrusted
+# review_authors: decided on the PR's author as GitHub reports it now, never on how the item was found.
+| (($p.user.login | ascii_downcase) | IN(($ARGS.named.review_authors // [])[] | ascii_downcase)) as $listed
+| ($reason == "review_requested" and ($via_search
+    or ((($p.requested_reviewers // []) | map(.login) | index($me)) != null))) as $requested
 | (
     if $p.state != "open" or ($p.merged // false) then {skip: "closed or merged"}
     elif $p.draft then {skip: "draft"}
@@ -69,11 +74,11 @@ def maxid: if length == 0 then null else max_by(.id) end;
         | if ($steps | length) == 0 then {skip: "nothing to address"}
           else $steps[0] + {steps: $steps, conflict: $dirty, conflict_key: $ckey} end
       end
-    elif $reason == "review_requested" then
+    elif $reason == "review_requested" or $listed then
       if ($review_enabled | not) then {skip: "review disabled"}
       elif $fork and ($allow_forks | not) then {skip: "fork PR, allow_forks is off"}
       # A sticky notification alone must not start a review: we must still be a requested reviewer.
-      elif ($via_search | not) and ((($p.requested_reviewers // []) | map(.login) | index($me)) == null) then
+      elif ($requested or $listed) | not then
         {skip: "not a current requested reviewer (stale notification)"}
       elif ([$rv[] | select(.user.login == $me and .commit_id == $p.head.sha
           and (.state | IN("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))] | length) > 0 then
@@ -85,6 +90,7 @@ def maxid: if length == 0 then null else max_by(.id) end;
       elif (($ARGS.named.review_max // 0) > 0) and ($p.additions + $p.deletions) > $ARGS.named.review_max then
         {skip: "review too large", lines: ($p.additions + $p.deletions)}
       else {kind: "review", key: "review|\($repo)|\($p.number)|\($p.head.sha)", who: $p.user.login}
+        + (if $requested then {} else {by_author: true} end)
       end
     else {skip: "not actionable (reason: \($reason))"}
     end

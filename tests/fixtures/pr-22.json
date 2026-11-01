@@ -1,0 +1,26 @@
+{
+  "number": 22,
+  "state": "open",
+  "draft": false,
+  "merged": false,
+  "title": "PR 22 title",
+  "html_url": "https://github.com/acme/app/pull/22",
+  "user": {
+    "login": "mallory"
+  },
+  "base": {
+    "repo": {
+      "full_name": "acme/app"
+    },
+    "ref": "main"
+  },
+  "head": {
+    "ref": "feature-22",
+    "sha": "lll000",
+    "repo": {
+      "full_name": "acme/app"
+    }
+  },
+  "author_association": "MEMBER",
+  "requested_reviewers": []
+}

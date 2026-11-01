@@ -29,7 +29,8 @@ export PR_AUTOPILOT_TRANSIENT_FILE=$JOB/transient # set by lib.sh gh() when retr
 echo "# $stamp $kind $repo#$n head=$head dry_run=$dry" >"$LOG"
 clone=$(jq -r --arg r "$repo" '.repos | to_entries[] | select(.key | ascii_downcase == ($r | ascii_downcase)) | .value' "$CONFIG")
 
-if [ "$kind" = review ]; then what="$who asked you to review it"
+if [ "$kind" = review ] && [ "$(g '.by_author // false')" = true ]; then what="$who wrote it (review_authors)"
+elif [ "$kind" = review ]; then what="$who asked you to review it"
 elif [ "$kind" = conflict ]; then what="yours has merge conflicts with $base"
 elif [ "$kind" = cifix ]; then what="CI failed on yours"
 elif [ "$cr" = true ]; then what="$who requested changes on yours"

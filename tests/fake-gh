@@ -54,6 +54,7 @@ case "$method $ep" in
   "GET user") echo '{"login":"me"}' | out ;;
   "GET notifications"*) if [ -n "${FAKE_NOTIF_EMPTY:-}" ]; then echo '[]'; else cat "$FIX"/notifications*.json; fi ;;
   "GET search/issues"*review-requested*) cat "$FIX/search-review.json" ;;
+  "GET search/issues"*draft%3Afalse*) echo "$ep" >>"$S/review-author-searches"; cat "$FIX/search-review-authors.json" ;;
   "GET search/issues"*author*) cat "$FIX/search-author.json" ;;
   "PATCH notifications/threads/"*) echo "PATCH $ep" >>"$W" ;;
   "GET repos/"*/pulls/*/reviews/*)
