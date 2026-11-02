@@ -477,6 +477,11 @@ check "head moved: exit 3, nothing posted" "3 0" "$($WK post acme/app 11 deadbee
 check "and it says the head moved" 1 "$(grep -c "NOT POSTED: the PR is now '$SHA open', you walked deadbeef" "$W/walk.out")"
 check "head unchanged: posts once, pinned to that sha" "0 POST repos/acme/app/pulls/11/reviews event=REQUEST_CHANGES commit_id=$SHA" "$($WK post acme/app 11 "$SHA" REQUEST_CHANGES "$W/walk-body.md" >/dev/null 2>&1; echo -n "$? "; grep POST "$S/writes.log")"
 check "a bad event is refused" 2 "$($WK post acme/app 11 "$SHA" MERGE "$W/walk-body.md" >/dev/null 2>&1; echo $?)"
+for d in true '"false"' null; do
+  jq --argjson d "$d" '.dry_run = $d' "$W/cfg0.json" >"$PR_AUTOPILOT_CONFIG"; : >"$S/writes.log"
+  check "walk post with dry_run $d: exit 4, nothing posted, says so" "4 0 1" "$($WK post acme/app 11 "$SHA" REQUEST_CHANGES "$W/walk-body.md" >"$W/walk.out" 2>&1; echo -n "$? "; echo -n "$(nwrites POST) "; grep -c 'NOT POSTED: dry_run is on' "$W/walk.out")"
+done
+cp "$W/cfg0.json" "$PR_AUTOPILOT_CONFIG"
 
 echo "-- review: a PR too large for one diff call falls back to per-file patches"
 cat >"$FIX/files-11.json" <<'J'

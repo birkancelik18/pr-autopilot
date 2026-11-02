@@ -15,6 +15,7 @@ case $cmd in
   draft) cat "$STATE_DIR/walks/${repo//\//_}-$n.json" 2>/dev/null || exit 1 ;;
   head) cur_head ;;
   post)
+    [ "$(jq -r 'if .dry_run == false then "false" else "true" end' "$CONFIG" 2>/dev/null)" = false ] || { echo "NOT POSTED: dry_run is on (anything but false counts as on), so walk mode posts nothing. Set \"dry_run\": false to post." >&2; exit 4; }
     sha=${4:-} event=${5:-} body=${6:-}
     case $event in APPROVE|REQUEST_CHANGES|COMMENT) ;; *) echo "event must be APPROVE, REQUEST_CHANGES or COMMENT" >&2; exit 2 ;; esac
     [ -n "$sha" ] && { [ "$event" = APPROVE ] || [ -s "$body" ]; } || { echo "need the walked sha, and a body file unless approving" >&2; exit 2; }
