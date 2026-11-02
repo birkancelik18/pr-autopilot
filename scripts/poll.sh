@@ -30,6 +30,15 @@ jq -e '.review_authors | . == null or (type == "array" and all(.[]; type == "str
   { report_throttled "pr-autopilot: review_authors in $CONFIG must be a list of GitHub logins (got $(jq -c .review_authors "$CONFIG")), doing nothing" last_config_error_report; exit 1; }
 jq -e '(.review_authors // []) | length <= 10' "$CONFIG" >/dev/null 2>&1 ||
   { report_throttled "pr-autopilot: review_authors in $CONFIG lists $(jq '.review_authors | length' "$CONFIG") logins, at most 10 (one search each per poll), doing nothing" last_config_error_report; exit 1; }
+# Search budget: each search runs once per repo chunk (chunks sized as for the longest login's query, see search()).
+# GitHub allows 30 searches a minute and the poll runs every minute: stay at SEARCH_BUDGET, well under it.
+SEARCH_BUDGET=20
+ra_n=$(jq '(.review_authors // []) | length' "$CONFIG")
+if [ "$ra_n" -gt 0 ]; then
+  ra_chunks=$(repo_chunks $((250 - $(jq -r '[(.review_authors // [])[] | length] | max + 19' "$CONFIG") - 30)) | wc -l | tr -d ' ')
+  [ $(((2 + ra_n) * ra_chunks)) -le "$SEARCH_BUDGET" ] ||
+    { report_throttled "pr-autopilot: review_authors would need $(((2 + ra_n) * ra_chunks)) GitHub searches per poll ((2 + $ra_n logins) x $ra_chunks repo groups), over the budget of $SEARCH_BUDGET (GitHub allows 30 a minute). Use fewer logins or repos. Doing nothing" last_config_error_report; exit 1; }
+fi
 
 # fix_settle_max_seconds: whole number (default 600), at least fix_settle_seconds: the longest a PR's fix job is held back.
 jq -e '(.fix_settle_max_seconds | . == null or (type == "number" and . >= 0 and . == floor))
@@ -134,15 +143,24 @@ search() { # search <qualifier> <reason>: all pages, over each repo chunk (query
   done < <(repo_chunks $((250 - ${#1} - 30)))
 }
 # review_authors: one search per login (at most 10), each over the repo chunks like the searches above.
+# A failed one (e.g. search rate limit) skips that login for this poll only, never the poll: reported once per outage.
 review_author_searches() {
-  local login
+  local login out failed=""
   while IFS= read -r login; do
-    [ -z "$login" ] || search "draft:false author:$login" review_author || return 1
+    [ -n "$login" ] || continue
+    if out=$(search "draft:false author:$login" review_author); then printf '%s' "${out:+$out$'\n'}"
+    else failed="$failed $login"; fi
   done < <(jq -r '(.review_authors // [])[]' "$CONFIG")
+  if [ -z "$failed" ]; then rm -f "$STATE_DIR/review_authors_failing"; return 0; fi
+  log "WARN review_authors search failed for$failed, skipping them this poll (see $STATE_DIR/polls.log)"
+  [ -e "$STATE_DIR/review_authors_failing" ] && return 0
+  touch "$STATE_DIR/review_authors_failing"
+  report "pr-autopilot: the review_authors search failed for$failed (GitHub search limit or outage?). Skipping them until it works again; everything else runs."
 }
 {
-  search "review-requested:$me" review_requested && search "author:$me" author && review_author_searches
+  search "review-requested:$me" review_requested && search "author:$me" author
 } >"$tmp/search" || poll_fail "poll failed: GitHub search failed (see $STATE_DIR/polls.log)"
+review_author_searches >>"$tmp/search"
 echo 0 >"$STATE_DIR/poll_failures"
 if ! gh api --paginate 'notifications?participating=true&per_page=50' 2>>"$STATE_DIR/polls.log" |
   jq -s -c --slurpfile c "$CONFIG" '

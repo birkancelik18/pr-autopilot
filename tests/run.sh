@@ -311,14 +311,32 @@ for bad in '"alice"' '["alice is:closed"]' '[7]'; do
   check "bad review_authors $bad: poller exits non-zero, reports it, starts nothing" "1 1 0" \
     "$rc $(grep -c 'review_authors .* must be a list of GitHub logins' "$S/notified") $(jobs_n)"
 done
-# 10 logins of GitHub's maximum length (39) and 30 long repo names: every query keeps its repo scope and fits.
+# 10 logins of GitHub's maximum length (39) over 3 repos: 12 search calls in all, each author query keeps its repo scope and fits.
 logins10=$(jq -nc '[range(10) | "u\(.)-" + ("x" * 36)]')
-repos30=$(jq -nc '[range(30) | {key: "some-org/a-fairly-long-repository-name-\(.)", value: "/tmp/x"}] | from_entries + {"Acme/App": "/tmp/no-such-clone"}')
-rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": $logins10, \"repos\": $repos30}"; poll
+repos3='{"Acme/App": "/tmp/no-such-clone", "some-org/a-fairly-long-repository-name-1": "/tmp/x", "some-org/a-fairly-long-repository-name-2": "/tmp/x"}'
+rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": $logins10, \"repos\": $repos3}"; poll
 qs=$(sed 's/.*&q=//' "$S/fake/review-author-searches" | while IFS= read -r q; do printf '%b\n' "${q//%/\\x}"; done)
-check "10 logins: every query has repo: scope and is at most 256 chars, all 31 repos covered per login" "0 0 310" \
-  "$(grep -vc ' repo:' <<<"$qs") $(awk 'length > 256' <<<"$qs" | wc -l | tr -d ' ') $(grep -o 'repo:[^ ]*' <<<"$qs" | wc -l | tr -d ' ')"
-check "and one login per query" 0 "$(grep -c 'author:.*author:' <<<"$qs")"
+check "10 logins: 12 search calls per poll (2 + 10, one repo group), 10 by author" "12 10" "$(wc -l <"$S/fake/searches" | tr -d ' ') $(wc -l <<<"$qs" | tr -d ' ')"
+check "every author query has repo: scope, is at most 256 chars, covers all 3 repos, names one login" "0 0 30 0" \
+  "$(grep -vc ' repo:' <<<"$qs") $(awk 'length > 256' <<<"$qs" | wc -l | tr -d ' ') $(grep -o 'repo:[^ ]*' <<<"$qs" | wc -l | tr -d ' ') $(grep -c 'author:.*author:' <<<"$qs")"
+repos31=$(jq -nc '[range(30) | {key: "some-org/a-fairly-long-repository-name-\(.)", value: "/tmp/x"}] | from_entries + {"Acme/App": "/tmp/no-such-clone"}')
+rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": [\"alice\", \"bob\"], \"repos\": $repos31}"
+PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
+check "over the search budget (2 logins x 31 repos): refuses with the numbers and the fix, searches nothing" "1 1 0 0" \
+  "$rc $(grep -c 'review_authors would need 32 GitHub searches per poll ((2 + 2 logins) x 8 repo groups), over the budget of 20 .*Use fewer logins or repos' "$S/notified") $(cat "$S/fake/searches" 2>/dev/null | wc -l | tr -d ' ') $(jobs_n)"
+rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"repos\": $repos31}"; poll
+check "the same 31 repos without review_authors still poll as before" 1 "$([ "$(jobs_n)" -gt 0 ] && echo 1 || echo 0)"
+# A failing author search (rate limit) skips that login only: the other searches and own-PR work go on.
+rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true '{"review_authors": ["alice", "bob"]}'
+FAKE_SEARCH_FAIL=author%3Abob PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?; sleep 0.4
+check "bob's search fails: poll exits 0, alice's #21 reviewed, own PR #12 fixed, review request #11 reviewed" "0 1 1 1" \
+  "$rc $(grep -c '"review","acme/app",21,' "$S/jobs.log") $(grep -c '"fix","acme/app",12,' "$S/jobs.log") $(grep -c '"review","acme/app",11,' "$S/jobs.log")"
+check "logged loudly, reported once, not counted as a failed poll" "1 1 0" \
+  "$(plog 'WARN review_authors search failed for bob, skipping them this poll') $(grep -c 'review_authors search failed for bob' "$S/notified") $(cat "$S/poll_failures")"
+FAKE_SEARCH_FAIL=author%3Abob poll
+check "still failing next poll: logged again, not reported again" "2 1" "$(plog 'WARN review_authors search failed for bob') $(grep -c 'review_authors search failed for bob' "$S/notified")"
+poll; FAKE_SEARCH_FAIL=author%3Abob poll
+check "it worked once, then failed again: a new outage is reported again" 2 "$(grep -c 'review_authors search failed for bob' "$S/notified")"
 rm -rf "$S"; mkdir -p "$S"; : >"$S/jobs.log"; mkcfg true "{\"review_authors\": $(jq -nc '[range(11) | "u\(.)"]')}"
 PR_AUTOPILOT_JOB="$T/fake-job" bash "$T/../scripts/poll.sh" >/dev/null 2>&1; rc=$?
 check "11 logins: poller exits non-zero, reports it, searches nothing, starts nothing" "1 1 0 0" \

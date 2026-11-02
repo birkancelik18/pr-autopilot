@@ -50,6 +50,12 @@ merged() { jq -s 'add' <(cat "$1" 2>/dev/null || echo '[]') <(cat "$S/posted-com
 out() { if [ -n "$expr" ]; then jq -r "$expr"; else cat; fi; }
 num() { sed -E 's#^repos/[^/]+/[^/]+/(pulls|issues)/([0-9]+).*#\2#' <<<"$1"; }
 
+# Every search call is counted in $S/searches; FAKE_SEARCH_FAIL=<text>: a search whose URL holds it fails (rate limit).
+if [[ $ep == search/* ]]; then
+  echo "$ep" >>"$S/searches"
+  if [ -n "${FAKE_SEARCH_FAIL:-}" ] && [[ $ep == *"$FAKE_SEARCH_FAIL"* ]]; then
+    echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit 1; fi
+fi
 case "$method $ep" in
   "GET user") echo '{"login":"me"}' | out ;;
   "GET notifications"*) if [ -n "${FAKE_NOTIF_EMPTY:-}" ]; then echo '[]'; else cat "$FIX"/notifications*.json; fi ;;
