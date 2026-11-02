@@ -51,6 +51,12 @@ J
   fix-dotgithub) # a fix to a CI workflow: .github/ is ordinary repo content, not .git
     mkdir -p .github/workflows && echo 'on: push' >.github/workflows/ci.yml
     echo '{"summary":"x","files":[".github/workflows/ci.yml"],"replies":[{"in_reply_to":5001,"body":"Fixed in {{sha}}."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-badpath) # FAKE_PATH: a pathspec, a glob or a nested repo path that must never reach git add
+    echo changed >>src/a.txt; mkdir -p nested/.git && echo x >nested/f.txt
+    jq -n --arg p "$FAKE_PATH" '{"summary":"x","files":[$p],"replies":[],"re_request":[]}' >"$jd/result.json" ;;
+  cifix-badpath)
+    echo changed >>src/a.txt; mkdir -p nested/.git && echo x >nested/f.txt
+    jq -n --arg p "$FAKE_PATH" '{"action":"fix","summary":"x","files":[$p]}' >"$jd/result.json" ;;
   fix-dotgit)
     echo '{"summary":"x","files":[".git/config"],"replies":[],"re_request":[]}' >"$jd/result.json" ;;
   fix-badreply)

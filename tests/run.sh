@@ -821,6 +821,11 @@ new=$(git -C "$O" rev-parse feature-11)
 check "live fix: one commit on the PR branch with the listed file only" "$SHA src/a.txt" "$(git -C "$O" rev-parse "$new^") $(git -C "$O" diff --name-only "$SHA" "$new")"
 check "and the report says pushed and verified" 1 "$(grep -c "I fixed the failing CI: the test expected the old label, pushed ${new:0:7} (verified on GitHub)" "$S/notified")"
 git -C "$O" update-ref refs/heads/feature-11 "$SHA"
+for p in ':/' 'src/*.txt' nested; do
+  reset; ev cifix false; FAKE_PATH=$p FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-badpath job
+  check "CI fix: listed path '$p' is refused before any write" "1 0 $SHA" \
+    "$(grep -c 'FAILED' "$S/notified") $(nw) $(git -C "$O" rev-parse feature-11)"
+done
 reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-rerun job
 check "flaky: re-runs the failed jobs of that run once, pushes nothing" "1 $SHA 1" "$(grep -c 'POST repos/acme/app/actions/runs/555/rerun-failed-jobs' "$S/writes.log") $(git -C "$O" rev-parse feature-11) $(grep -c 'I re-ran the failed CI jobs once' "$S/notified")"
 reset; ev cifix false; FAKE_CHECKS=$W/checks-red.json FAKE_HEAD_REPO=$O FAKE_CLAUDE=cifix-none job
@@ -843,6 +848,11 @@ check "a file under .github/ is accepted and committed (not mistaken for .git)" 
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-dotgit job
 check "a path inside .git is still refused before any write" "1 0 $SHA" \
   "$(grep -c 'lists a path inside .git' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
+for p in ':/' ':(top)src/a.txt' 'src/*.txt' 'src/?.txt' 'src/[a].txt' nested nested/f.txt; do
+  reset_fix; ev fix false; FAKE_PATH=$p FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-badpath job
+  check "fix: listed path '$p' (pathspec, glob or nested repo) is refused before any write" "1 0 $SHA" \
+    "$(grep -c 'FAILED' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
+done
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-many job
 check "more replies than open human comments is refused before any write" "1 0" "$(grep -c 'only 1 open comments (cap)' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
 echo "-- fix: review threads are handed over with their resolved state; a review bot's comment may get a reply"

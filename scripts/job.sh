@@ -547,18 +547,31 @@ body_unchanged() { # the description must be what the job read at start, or a ne
   [ "$now" = "$(jq -r "$NORM_BODY" "$JOB/pr.json")" ] ||
     fail "the PR description changed while the job ran, so I did not overwrite it and posted no reply. NEEDS YOU: check the description against the review"
 }
+refuse_nested_repos() { # a listed path that is, holds or sits in a nested repo would be staged as a gitlink
+  local f p
+  for f in "$@"; do
+    [ -d "$WT/$f" ] && [ -n "$(find "$WT/$f" -name .git -print -quit)" ] &&
+      fail "result.json lists $f, which holds a nested git repo (refused)"
+    p=$f
+    while :; do
+      [ -e "$WT/$p/.git" ] && fail "result.json lists $f, which is inside a nested git repo (refused)"
+      case $p in */*) p=${p%/*} ;; *) break ;; esac
+    done
+  done
+}
 finish_fix() {
   local r=$JOB/result.json
   [ -s "$r" ] || fail "the model wrote no result.json"
   jq -e --slurpfile cm "$JOB/comments.json" '
     (.summary | type == "string") and (.commit_message // "x" | type == "string")
     and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
-      and (contains("..") | not) and (split("/")[0] != ".git")))
+      and (contains("..") | not) and (split("/")[0] != ".git")
+      and (startswith(":") | not) and (test("[*?\\[]") | not)))
     and (.re_request | type == "array" and all(type == "string"))
     and (.replies | type == "array" and all(
       (.body | type == "string" and test("\\S") and length < 3000)
       and (.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))))' "$r" >/dev/null ||
-    fail "result.json is malformed, lists a path inside .git, or replies to a comment id that does not exist"
+    fail "result.json is malformed, lists a path inside .git or a pathspec/glob, or replies to a comment id that does not exist"
 
   # Reply cap: at most one per open comment (human, or a review bot's inline comment), never more than 20.
   local cap
@@ -571,8 +584,9 @@ finish_fix() {
   # Only the files the model lists are committed, never `git add -A`.
   local dirty changed summary msg newsha files=() f
   while IFS= read -r f; do files+=("$f"); done < <(jq -r '(.files // [])[]' "$r")
+  [ ${#files[@]} -eq 0 ] || refuse_nested_repos "${files[@]}"
   dirty=0
-  [ ${#files[@]} -eq 0 ] || dirty=$(git -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
+  [ ${#files[@]} -eq 0 ] || dirty=$(git --literal-pathspecs -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
   git -C "$WT" status --porcelain | cut -c4- | while IFS= read -r f; do
     case " ${files[*]-} " in *" $f "*) ;; *) echo "not committed (not listed in result.json): $f" >>"$LOG" ;; esac
   done
@@ -638,7 +652,7 @@ finish_fix() {
   # of the loop closing silently.
   local escalate codechanged=0 esc_note=""
   escalate=$(jq -r '.escalate // "" | gsub("\\s+"; " ") | ltrimstr(" ") | .[0:1500]' "$r")
-  [ ${#files[@]} -eq 0 ] || codechanged=$(git -C "$WT" status --porcelain -- "${files[@]}" | cut -c4- |
+  [ ${#files[@]} -eq 0 ] || codechanged=$(git --literal-pathspecs -C "$WT" status --porcelain -- "${files[@]}" | cut -c4- |
     grep -cvE '(^|/)docs?/|\.(md|mdx|rst|txt|adoc)$')
   if [ -z "$escalate" ] && [ "$codechanged" -eq 0 ] && jq -e --arg me "$me" '
     map(select(.state != "PENDING" and .user.login != $me)) | group_by(.user.login) | map(max_by(.id))
@@ -673,7 +687,7 @@ finish_fix() {
   if [ "$dirty" -gt 0 ]; then
     msg=$(jq -r '.commit_message // "Address review feedback"' "$r" | head -c 300 | defang)
     [ -n "$msg" ] || msg="Address review feedback"
-    git -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
+    git --literal-pathspecs -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
     git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
     newsha=$(git -C "$WT" rev-parse HEAD)
     posted=1
@@ -811,7 +825,8 @@ finish_cifix() {
   [ -s "$r" ] || fail "the model wrote no result.json"
   jq -e '((.action // "") | IN("fix", "rerun", "none")) and (.summary | type == "string")
     and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
-      and (contains("..") | not) and (split("/")[0] != ".git")))' "$r" >/dev/null ||
+      and (contains("..") | not) and (split("/")[0] != ".git")
+      and (startswith(":") | not) and (test("[*?\\[]") | not)))' "$r" >/dev/null ||
     fail "result.json is malformed"
   action=$(jq -r .action "$r")
   summary=$(jq -r .summary "$r" | cut -c1-250)
@@ -838,8 +853,9 @@ finish_cifix() {
   fi
   # action fix: commit only the files the model lists, never `git add -A`.
   while IFS= read -r f; do files+=("$f"); done < <(jq -r '(.files // [])[]' "$r")
+  [ ${#files[@]} -eq 0 ] || refuse_nested_repos "${files[@]}"
   [ ${#files[@]} -gt 0 ] || fail "the model chose fix but listed no files"
-  dirty=$(git -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
+  dirty=$(git --literal-pathspecs -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
   [ "$dirty" -gt 0 ] || fail "the model chose fix but the listed files are unchanged"
   [ "$dry" = true ] && succeed "I would have fixed the failing CI: $summary ($dirty files) and pushed (nothing was pushed)."
   live_now
@@ -847,7 +863,7 @@ finish_cifix() {
   run_local_tests
   msg=$(jq -r '.commit_message // "Fix failing CI"' "$r" | head -c 300 | defang)
   [ -n "$msg" ] || msg="Fix failing CI"
-  git -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
+  git --literal-pathspecs -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
   git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
   newsha=$(git -C "$WT" rev-parse HEAD)
   posted=1
