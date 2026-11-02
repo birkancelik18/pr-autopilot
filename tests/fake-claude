@@ -48,6 +48,11 @@ J
     echo '{"summary":"x","files":[],"deferrals":[{"issue_title":"  ","body":"x"}],"replies":[{"in_reply_to":5001,"body":"Tracked in {{deferral:0}}."}],"re_request":[]}' >"$jd/result.json" ;;
   fix-blank-reply)
     echo '{"summary":"x","files":[],"replies":[{"in_reply_to":5001,"body":" "}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-dotgithub) # a fix to a CI workflow: .github/ is ordinary repo content, not .git
+    mkdir -p .github/workflows && echo 'on: push' >.github/workflows/ci.yml
+    echo '{"summary":"x","files":[".github/workflows/ci.yml"],"replies":[{"in_reply_to":5001,"body":"Fixed in {{sha}}."}],"re_request":[]}' >"$jd/result.json" ;;
+  fix-dotgit)
+    echo '{"summary":"x","files":[".git/config"],"replies":[],"re_request":[]}' >"$jd/result.json" ;;
   fix-badreply)
     echo '{"summary":"x","replies":[{"in_reply_to":424242,"body":"hi"}],"re_request":[]}' >"$jd/result.json" ;;
   fix-many)

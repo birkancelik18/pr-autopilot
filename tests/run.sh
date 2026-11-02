@@ -836,6 +836,13 @@ reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix job
 check "fix allow list has no Bash at all (default)" 0 "$(allow | grep -c Bash)"
 new=$(git -C "$O" rev-parse refs/heads/feature-11)
 check "only the file listed in result.json is committed, never git add -A" "src/a.txt" "$(git -C "$O" diff --name-only "$SHA" "$new")"
+reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-dotgithub job
+new=$(git -C "$O" rev-parse refs/heads/feature-11)
+check "a file under .github/ is accepted and committed (not mistaken for .git)" "0 .github/workflows/ci.yml" \
+  "$(grep -c 'FAILED' "$S/notified") $(git -C "$O" diff --name-only "$SHA" "$new")"
+reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-dotgit job
+check "a path inside .git is still refused before any write" "1 0 $SHA" \
+  "$(grep -c 'lists a path inside .git' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-many job
 check "more replies than open human comments is refused before any write" "1 0" "$(grep -c 'only 1 open comments (cap)' "$S/notified") $(cat "$S/writes.log" 2>/dev/null | grep -c POST)"
 echo "-- fix: review threads are handed over with their resolved state; a review bot's comment may get a reply"

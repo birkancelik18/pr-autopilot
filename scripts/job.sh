@@ -553,12 +553,12 @@ finish_fix() {
   jq -e --slurpfile cm "$JOB/comments.json" '
     (.summary | type == "string") and (.commit_message // "x" | type == "string")
     and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
-      and (contains("..") | not) and (startswith(".git") | not)))
+      and (contains("..") | not) and (split("/")[0] != ".git")))
     and (.re_request | type == "array" and all(type == "string"))
     and (.replies | type == "array" and all(
       (.body | type == "string" and test("\\S") and length < 3000)
       and (.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))))' "$r" >/dev/null ||
-    fail "result.json is malformed or replies to a comment id that does not exist"
+    fail "result.json is malformed, lists a path inside .git, or replies to a comment id that does not exist"
 
   # Reply cap: at most one per open comment (human, or a review bot's inline comment), never more than 20.
   local cap
@@ -811,7 +811,7 @@ finish_cifix() {
   [ -s "$r" ] || fail "the model wrote no result.json"
   jq -e '((.action // "") | IN("fix", "rerun", "none")) and (.summary | type == "string")
     and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
-      and (contains("..") | not) and (startswith(".git") | not)))' "$r" >/dev/null ||
+      and (contains("..") | not) and (split("/")[0] != ".git")))' "$r" >/dev/null ||
     fail "result.json is malformed"
   action=$(jq -r .action "$r")
   summary=$(jq -r .summary "$r" | cut -c1-250)
