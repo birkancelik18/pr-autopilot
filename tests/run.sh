@@ -850,13 +850,16 @@ check "a file under .github/ is accepted and committed (not mistaken for .git)" 
   "$(grep -c 'FAILED' "$S/notified") $(git -C "$O" diff --name-only "$SHA" "$new")"
 reset_fix; ev fix false; FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-dotgit job
 check "a path inside .git is still refused before any write" "1 0 $SHA" \
-  "$(grep -c 'lists a path inside .git' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
-for p in 'app/[id]/page.tsx' ':name' 'src/*star.txt'; do # literal pathspecs: these are just file names
+  "$(grep -c 'a listed path is inside .git' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
+for p in 'app/api/proxy/[...path]/route.ts' 'app/[id]/page.tsx' ':name' 'src/*star.txt'; do # literal pathspecs: these are just file names
   reset_fix; ev fix false; FAKE_PATH=$p FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-path job
   new=$(git -C "$O" rev-parse refs/heads/feature-11)
   check "fix: a file named '$p' commits as exactly that file" "0 $p" \
     "$(grep -c 'FAILED' "$S/notified") $(git -C "$O" diff --name-only "$SHA" "$new")"
 done
+reset_fix; ev fix false; FAKE_PATH='a/../b' FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-path-raw job
+check "fix: a/../b is refused naming the .. rule, nothing written" "1 0 $SHA" \
+  "$(grep -c 'a listed path has a .. segment' "$S/notified") $(nw) $(git -C "$O" rev-parse refs/heads/feature-11)"
 for g in .git .GIT; do
   reset_fix; ev fix false; FAKE_GITDIR=$g FAKE_HEAD_REPO=$O FAKE_CLAUDE=fix-nested job
   check "fix: a nested repo ($g) is refused after git add, nothing pushed" "1 $SHA" \

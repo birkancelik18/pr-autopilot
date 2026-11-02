@@ -54,6 +54,8 @@ J
   fix-path) # FAKE_PATH: an ordinary file whose name only looks like a pathspec or glob
     mkdir -p "$(dirname -- "$FAKE_PATH")" && echo x >"./$FAKE_PATH"
     jq -n --arg p "$FAKE_PATH" '{"summary":"x","files":[$p],"replies":[],"re_request":[]}' >"$jd/result.json" ;;
+  fix-path-raw) # FAKE_PATH listed verbatim, file not created (for refusals)
+    jq -n --arg p "$FAKE_PATH" '{"summary":"x","files":[$p],"replies":[],"re_request":[]}' >"$jd/result.json" ;;
   fix-nested|cifix-nested) # a model-made nested repo; FAKE_GITDIR=.GIT spells it the case-insensitive way
     git init -q nested && git -C nested -c user.name=x -c user.email=x@x commit -q --allow-empty -m x
     [ "${FAKE_GITDIR:-.git}" = .git ] || mv nested/.git "nested/$FAKE_GITDIR"

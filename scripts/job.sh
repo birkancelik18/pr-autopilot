@@ -554,18 +554,26 @@ refuse_gitlinks() { # after git add: a nested repo (any .git spelling) is staged
   git -C "$WT" reset -q >>"$LOG" 2>&1
   fail "a listed path stages a nested git repo (gitlink): $g- refused, nothing committed or pushed"
 }
+# Names the first rule a result.json "files" list breaks (empty when fine). Only a whole ".." segment is a
+# parent-directory path: names like app/api/[...path]/route.ts are ordinary files.
+files_problem() {
+  jq -r '(.files // []) as $f | if ($f | type) != "array" or ($f | any(type != "string" or length == 0)) then "files is not a list of non-empty strings"
+    elif $f | any(startswith("/")) then "a listed path is absolute"
+    elif $f | any(split("/") | any(. == "..")) then "a listed path has a .. segment"
+    elif $f | any(split("/")[0] == ".git") then "a listed path is inside .git"
+    else empty end' "$1"
+}
 finish_fix() {
   local r=$JOB/result.json
   [ -s "$r" ] || fail "the model wrote no result.json"
-  jq -e --slurpfile cm "$JOB/comments.json" '
-    (.summary | type == "string") and (.commit_message // "x" | type == "string")
-    and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
-      and (contains("..") | not) and (split("/")[0] != ".git")))
+  jq -e . "$r" >/dev/null 2>&1 || fail "result.json is malformed: not valid JSON"
+  local why; why=$(files_problem "$r"); [ -z "$why" ] || fail "result.json is malformed: $why"
+  jq -e '(.summary | type == "string") and (.commit_message // "x" | type == "string")
     and (.re_request | type == "array" and all(type == "string"))
-    and (.replies | type == "array" and all(
-      (.body | type == "string" and test("\\S") and length < 3000)
-      and (.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))))' "$r" >/dev/null ||
-    fail "result.json is malformed, lists a path inside .git or a or replies to a comment id that does not exist"
+    and (.replies | type == "array" and all(.body | type == "string" and test("\\S") and length < 3000))' "$r" >/dev/null ||
+    fail "result.json is malformed: summary, commit_message, re_request or a reply body has the wrong shape (or a reply body is blank)"
+  jq -e --slurpfile cm "$JOB/comments.json" '.replies | all(.in_reply_to == null or (.in_reply_to as $i | $cm[0] | any(.id == $i)))' "$r" >/dev/null ||
+    fail "result.json is malformed: a reply names a comment id that does not exist"
 
   # Reply cap: at most one per open comment (human, or a review bot's inline comment), never more than 20.
   local cap
@@ -817,10 +825,9 @@ finish_conflict() {
 finish_cifix() {
   local r=$JOB/result.json action summary files=() f dirty msg newsha runs run
   [ -s "$r" ] || fail "the model wrote no result.json"
-  jq -e '((.action // "") | IN("fix", "rerun", "none")) and (.summary | type == "string")
-    and ((.files // []) | type == "array" and all(type == "string" and length > 0 and (startswith("/") | not)
-      and (contains("..") | not) and (split("/")[0] != ".git")))' "$r" >/dev/null ||
-    fail "result.json is malformed"
+  jq -e '((.action // "") | IN("fix", "rerun", "none")) and (.summary | type == "string")' "$r" >/dev/null ||
+    fail "result.json is malformed: action must be fix, rerun or none, and summary a string"
+  local why; why=$(files_problem "$r"); [ -z "$why" ] || fail "result.json is malformed: $why"
   action=$(jq -r .action "$r")
   summary=$(jq -r .summary "$r" | cut -c1-250)
   check_head
