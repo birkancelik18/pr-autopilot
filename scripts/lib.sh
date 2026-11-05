@@ -1,6 +1,8 @@
+# shellcheck shell=bash
 # Shared helpers, sourced by poll.sh, job.sh and ctl.sh. Needs bash, gh, jq, git, claude.
 STATE_DIR=${PR_AUTOPILOT_STATE:-$HOME/.local/state/pr-autopilot}
 CONFIG=${PR_AUTOPILOT_CONFIG:-$HOME/.config/pr-autopilot/config.json}
+# shellcheck disable=SC2034 # used by job.sh
 PLUGIN_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 mkdir -p "$STATE_DIR"/{logs,running,events,worktrees,jobs}
 touch "$STATE_DIR/polls.log"
@@ -116,6 +118,8 @@ limit_active() {
     *) [ "$(date +%s)" -lt "$until" ] ;;
   esac
 }
+# epoch_date <epoch> [+format]: date of an epoch on macOS (date -r) and Linux (date -d @).
+epoch_date() { date -r "$1" "${@:2}" 2>/dev/null || date -d "@$1" "${@:2}"; }
 # limit_until <claude's message>: epoch when the limit resets ("resets 3:20pm (Europe/Istanbul)"), else now + 30 min.
 # ponytail: only today/tomorrow clock times; "resets Oct 21, 3am" style falls back to 30 minutes.
 limit_until() {

@@ -78,7 +78,8 @@ install() {
   mkdir -p "$BASE" "$STATE"
   rm -f "$STATE/paused" # a leftover pause from an earlier uninstall must not silence a fresh setup
   if [ "$SRC" != "$(cd "$DEST" 2>/dev/null && pwd -P)" ]; then
-    local new=$BASE/plugin-$(date +%s)
+    local new
+    new=$BASE/plugin-$(date +%s)
     mkdir -p "$new" && cp -R "$SRC/." "$new/"
     ln -sfn "$new" "$DEST.tmp"
     mv -fh "$DEST.tmp" "$DEST" 2>/dev/null || mv -fT "$DEST.tmp" "$DEST"
@@ -91,8 +92,8 @@ install() {
     render_plist >"$PLIST"
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     # bootout is asynchronous; bootstrap can fail until the old job is gone, so retry.
-    local i
-    for i in 1 2 3 4 5 6; do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break; sleep 1; done
+    local _
+    for _ in 1 2 3 4 5 6; do launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break; sleep 1; done
     launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || { echo "launchd did not load $LABEL" >&2; exit 1; }
     echo "Installed launchd job $LABEL (every 60s)."
     notify_test

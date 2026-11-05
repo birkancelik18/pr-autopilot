@@ -410,8 +410,8 @@ if [ -z "$skip_model" ]; then
     first=1; limit_active && first=""
     limit_until "$msg" >"$STATE_DIR/claude_limited"
     echo "claude limit reached ($msg), job not counted as an attempt" >>"$LOG"
-    log "$repo#$n: claude limit reached, pausing job starts until $(date -r "$(cat "$STATE_DIR/claude_limited")")"
-    [ -z "$first" ] || report "$prefix Claude usage limit hit: \"$(head -c 200 <<<"$msg")\". No job starts until $(date -r "$(cat "$STATE_DIR/claude_limited")" '+%H:%M'); nothing counted as a failure."
+    log "$repo#$n: claude limit reached, pausing job starts until $(epoch_date "$(cat "$STATE_DIR/claude_limited")")"
+    [ -z "$first" ] || report "$prefix Claude usage limit hit: \"$(head -c 200 <<<"$msg")\". No job starts until $(epoch_date "$(cat "$STATE_DIR/claude_limited")" '+%H:%M'); nothing counted as a failure."
     exit 0
   fi
   [ "$rc" -eq 0 ] || fail "claude exited with status $rc (143 or 137 usually means the timeout)"
@@ -554,6 +554,18 @@ refuse_gitlinks() { # after git add: a nested repo (any .git spelling) is staged
   git -C "$WT" reset -q >>"$LOG" 2>&1
   fail "a listed path stages a nested git repo (gitlink): $g- refused, nothing committed or pushed"
 }
+add_listed() { # git add the caller's $files, then refuse_gitlinks. A nested repo spelled .GIT is a gitlink on
+  # macOS (case-insensitive) but an "invalid path" add error on Linux: both get the same refusal.
+  local out
+  if ! out=$(git --literal-pathspecs -C "$WT" add -A -- "${files[@]}" 2>&1); then
+    printf '%s\n' "$out" >>"$LOG"
+    grep -qiE "invalid path '([^']*/)?\.git/" <<<"$out" &&
+      fail "a listed path stages a nested git repo (gitlink): $(grep -m1 -oiE "invalid path '[^']*" <<<"$out" | cut -c15-) - refused, nothing committed or pushed"
+    fail "git add failed"
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out" >>"$LOG"
+  refuse_gitlinks
+}
 # Names the first rule a result.json "files" list breaks (empty when fine). Only a whole ".." segment is a
 # parent-directory path: names like app/api/[...path]/route.ts are ordinary files.
 files_problem() {
@@ -584,7 +596,7 @@ finish_fix() {
   [ "$(jq '.replies | length' "$r")" -le "$cap" ] || fail "result.json has $(jq '.replies | length' "$r") replies but there are only $cap open comments (cap)"
 
   # Only the files the model lists are committed, never `git add -A`.
-  local dirty changed summary msg newsha files=() f
+  local dirty summary msg newsha files=() f
   while IFS= read -r f; do files+=("$f"); done < <(jq -r '(.files // [])[]' "$r")
   dirty=0
   [ ${#files[@]} -eq 0 ] || dirty=$(git --literal-pathspecs -C "$WT" status --porcelain -- "${files[@]}" | wc -l | tr -d ' ')
@@ -688,8 +700,7 @@ finish_fix() {
   if [ "$dirty" -gt 0 ]; then
     msg=$(jq -r '.commit_message // "Address review feedback"' "$r" | head -c 300 | defang)
     [ -n "$msg" ] || msg="Address review feedback"
-    git --literal-pathspecs -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
-    refuse_gitlinks
+    add_listed
     git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
     newsha=$(git -C "$WT" rev-parse HEAD)
     posted=1
@@ -862,8 +873,7 @@ finish_cifix() {
   run_local_tests
   msg=$(jq -r '.commit_message // "Fix failing CI"' "$r" | head -c 300 | defang)
   [ -n "$msg" ] || msg="Fix failing CI"
-  git --literal-pathspecs -C "$WT" add -A -- "${files[@]}" >>"$LOG" 2>&1 || fail "git add failed"
-    refuse_gitlinks
+  add_listed
   git -C "$WT" -c core.hooksPath=/dev/null commit -q -m "$msg" >>"$LOG" 2>&1 || fail "git commit failed"
   newsha=$(git -C "$WT" rev-parse HEAD)
   posted=1

@@ -190,7 +190,8 @@ running() {
 key_running() {
   local f
   for f in "$STATE_DIR"/running/*; do
-    [ -e "$f" ] && kill -0 "$(basename "$f")" 2>/dev/null && [[ "$(cat "$f")" == $1 ]] && return 0 # $1 may be a glob
+    # shellcheck disable=SC2053 # $1 may be a glob
+    [ -e "$f" ] && kill -0 "$(basename "$f")" 2>/dev/null && [[ "$(cat "$f")" == $1 ]] && return 0
   done
   return 1
 }
@@ -217,7 +218,7 @@ settled() {
 # job.sh writes claude_limited (the reset epoch) when claude reports a spent session/usage/spend limit.
 limited=""
 if limit_active; then
-  limited=1; log "claude limit active (until $(date -r "$(cat "$STATE_DIR/claude_limited")" 2>/dev/null || echo "30 minutes after it was hit")), not starting jobs"
+  limited=1; log "claude limit active (until $(epoch_date "$(cat "$STATE_DIR/claude_limited")" 2>/dev/null || echo "30 minutes after it was hit")), not starting jobs"
 fi
 
 clear_settle() { # forget when this PR's settle wait began (uses process_item's seen_key)
@@ -265,14 +266,16 @@ process_item() {
     log "skip $repo#$n: $(jq -r .skip <<<"$ev")"
     # Too large to review: tell the owner once per head (size-skipped.tsv), like ci-gave-up.tsv.
     if [ "$(jq -r '.nosize // false' <<<"$ev")" = true ]; then
-      local sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
+      local sk
+      sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
       if ! grep -qxF "$sk" "$STATE_DIR/size-skipped.tsv" 2>/dev/null; then
         echo "$sk" >>"$STATE_DIR/size-skipped.tsv"
         report "$(jq -r .url <<<"$ev")
 PR #$n ($(jq -r .title <<<"$ev")): skipped review, GitHub gave no size (review_max_changed_lines is set)."
       fi
     elif [ "$(jq -r '.lines // ""' <<<"$ev")" != "" ]; then
-      local sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
+      local sk
+      sk="$mode|$repo#$n|$(jq -r .head <<<"$ev")"
       if ! grep -qxF "$sk" "$STATE_DIR/size-skipped.tsv" 2>/dev/null; then
         echo "$sk" >>"$STATE_DIR/size-skipped.tsv"
         report "$(jq -r .url <<<"$ev")

@@ -12,6 +12,8 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/bin" "$W/state"
 cp "$T/fake-gh" "$W/bin/gh"; cp "$T/fake-claude" "$W/bin/claude"
 printf '#!/usr/bin/env bash\necho "$@" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/osascript"
+# report() uses notify-send on Linux; one line per notification, like the window osascript gets on macOS.
+printf '#!/usr/bin/env bash\nm="$*"; echo "${m//$'"'"'\\n'"'"'/ }" >>"$PR_AUTOPILOT_STATE/notified"\n' >"$W/bin/notify-send"
 printf '#!/usr/bin/env bash\necho "TN $@" >>"$PR_AUTOPILOT_STATE/notified"; exit ${FAKE_TN_EXIT:-0}\n' >"$W/bin/terminal-notifier"
 # BSD seq (macOS) counts down for "seq 0 -1" and prints 0 and -1; this shim shows that on any machine.
 printf '#!/usr/bin/env bash\ni=$1; if [ "$1" -le "$2" ]; then s=1; else s=-1; fi\nwhile :; do echo $i; [ $i -eq $2 ] && break; i=$((i + s)); done\n' >"$W/bin/seq"
@@ -1078,10 +1080,11 @@ if [ "$(uname)" = Darwin ]; then
   rm -f "$S/notified"; PR_AUTOPILOT_CONFIG=$W/c8.json bash "$T/../scripts/install-scheduler.sh" notify-test >/dev/null
   check "window style: no test banner" 0 "$(cat "$S/notified" 2>/dev/null | grep -c '^TN')"
 fi
-check "plugin version is 0.8.0 and the installer reports it" "0.8.0 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.8.0')"
-if ! command -v notify-send >/dev/null; then
+check "plugin version is 0.8.1 and the installer reports it" "0.8.1 1" "$(jq -r .version "$T/../.claude-plugin/plugin.json") $(HOME=$W/nohome bash "$T/../scripts/install-scheduler.sh" version | grep -c '^source:    0.8.1')"
+check "epoch_date formats an epoch on macOS and Linux" 1970-01-01 "$(. "$T/../scripts/lib.sh"; TZ=UTC epoch_date 0 +%F)"
+if ! PATH="${PATH#"$W/bin:"}" command -v notify-send >/dev/null; then
   mkdir -p "$W/linux"; printf '#!/usr/bin/env bash\necho Linux\n' >"$W/linux/uname"; chmod +x "$W/linux/uname"
-  (PATH="$W/linux:$PATH"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1
+  (PATH="$W/linux:${PATH#"$W/bin:"}"; . "$T/../scripts/lib.sh"; report "no link here") >/dev/null 2>&1
   check "Linux without notify-send: logged, not silent" 1 "$(grep -c 'no notify-send; desktop notification skipped' "$S/polls.log")"
 fi
 check "uninstall and install both clear a leftover pause" 2 "$(grep -c 'rm -f "$STATE/paused"' "$T/../scripts/install-scheduler.sh")"

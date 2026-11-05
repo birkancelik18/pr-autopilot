@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1
+
+- Fix: on Linux the "Claude limit hit, no job starts until HH:MM" notification and log line had no time (`date -r <epoch>` is macOS-only; GNU `date -d @<epoch>` is now used there). A fix or CI-fix that lists a folder holding a nested repo spelled `.GIT` failed on Linux as a bare "git add failed" (Linux git refuses the path, macOS stages a gitlink); it now gets the same "nested git repo" refusal on both. Scripts pass `shellcheck -S warning`, and the tests run green on Linux (the test harness now fakes `notify-send` as well as `osascript`).
+
 ## 0.8.0
 
 - New config key `review_authors` (default `[]`: no change): GitHub logins whose open, non-draft PRs in your configured repos are reviewed even when nobody requested your review, e.g. `["alice", "bob"]`. They go through the same path as a review request: same `reviewing_mode`, `review_enabled`, `allow_forks`, `review_max_changed_lines`, live-since and retry rules, and each head is reviewed once (a PR you already reviewed at its current head is skipped). It costs one extra search per listed login per poll (at most 10 logins, more stops the poller loudly), each scoped to your configured repos; search hits outside them are dropped. A config that would need more than 20 searches per poll ((2 + logins) x repo groups) is refused with the numbers. A failed teammate search (e.g. a rate limit) skips that login for the poll, never the whole poll, and is reported once per outage. Whether a PR counts is decided on its author as GitHub reports it when the PR is fetched, not on the search hit. Anything but a list of GitHub logins stops the poller with a loud report.
